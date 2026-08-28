@@ -18,6 +18,19 @@ class Settings(BaseSettings):
     ASYNC_DATABASE_URL: str
     CHECKPOINT_DATABASE_URL: str
     DATABASE_NAME: str = "table_hub"
+    JWT_SECRET_KEY: str = ""
+    JWT_ALGORITHM: str = "HS256"
+    JWT_ISSUER: str = "table-hub-server"
+    JWT_AUDIENCE: str = "table-hub-web"
+    JWT_ACCESS_EXPIRES_MINUTES: int = 15
+    JWT_REFRESH_EXPIRES_DAYS: int = 30
+    AUTH_COOKIE_SECURE: bool = False
+    AUTH_COOKIE_SAMESITE: str = "lax"
+    AUTH_COOKIE_DOMAIN: str | None = None
+    CORS_ORIGINS: str = (
+        "http://localhost:3000,http://localhost:3001,"
+        "http://127.0.0.1:3000,http://127.0.0.1:3001"
+    )
 
     @property
     def database_url(self) -> str:
@@ -28,6 +41,12 @@ class Settings(BaseSettings):
             .set(database=self.DATABASE_NAME)
             .render_as_string(hide_password=False)
         )
+
+    @property
+    def cors_origins(self) -> list[str]:
+        return [
+            origin.strip() for origin in self.CORS_ORIGINS.split(",") if origin.strip()
+        ]
 
     # DeepSeek API
     DEEPSEEK_API_KEY: str | None = None
@@ -73,6 +92,9 @@ class Settings(BaseSettings):
     OSS_REGION: str = "cn-beijing"
     OSS_ENDPOINT: str = "oss-cn-beijing.aliyuncs.com"
     OSS_PUBLIC_BASE_URL: str = ""
+    OSS_PRESIGN_EXPIRES_SECONDS: int = 900
+    OSS_MAX_FILES_PER_PACKAGE: int = 500
+    OSS_MAX_PACKAGE_SIZE_BYTES: int = 2 * 1024 * 1024 * 1024
     # 其他配置
     REDIS_URL: str = "redis://localhost:6379"
 

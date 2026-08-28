@@ -9,6 +9,13 @@ from sqlalchemy.ext.asyncio import async_engine_from_config
 
 from app.core.config import settings
 from app.core.database import Base
+from app.modules.auth.models import (  # noqa: F401
+    RefreshToken,
+    Store,
+    StoreInvite,
+    StoreMember,
+)
+from app.modules.knowledge.models import KnowledgeDocument  # noqa: F401
 from app.modules.user.models import User  # noqa: F401
 
 config = context.config

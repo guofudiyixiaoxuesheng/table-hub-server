@@ -1,11 +1,12 @@
-"""统一 API 成功和失败响应结构。"""
+"""统一 API 成功响应函数。"""
 
-from pydantic import BaseModel
+from typing import Any
 
 
-class ApiResponse[DataT](BaseModel):
-    """成功响应统一外层结构。"""
+def success_response(
+    data: Any = None,
+    message: str = "success",
+) -> dict[str, Any]:
+    """生成项目统一成功响应。"""
 
-    code: str = "ok"
-    message: str = "success"
-    data: DataT
+    return {"code": "ok", "message": message, "data": data}

@@ -5,32 +5,30 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.modules.user.exceptions import UserPhoneAlreadyExistsError
 from app.modules.user.models import User, UserRole
-from app.modules.user.repositories import UserRepository
-from app.modules.user.schemas import CreateUserRequest
+from app.modules.user.repositories import add_user, get_user_by_phone
+from app.modules.user.schemas import CreateUserRequest, UserResponse
 
 
-class CreateUserAction:
+async def create_user_action(
+    payload: CreateUserRequest,
+    db: AsyncSession,
+) -> UserResponse:
     """校验手机号唯一性并创建普通用户。"""
 
-    def __init__(self, session: AsyncSession) -> None:
-        self.session = session
-        self.repository = UserRepository(session)
+    if await get_user_by_phone(payload.phone, db):
+        raise UserPhoneAlreadyExistsError
 
-    async def execute(self, request: CreateUserRequest) -> User:
-        """执行创建普通用户用例。"""
+    user = User(
+        phone=payload.phone,
+        nickname=payload.nickname,
+        avatar_url=payload.avatar_url,
+        role=UserRole.USER,
+    )
 
-        if await self.repository.get_by_phone(request.phone):
-            raise UserPhoneAlreadyExistsError
+    try:
+        user = await add_user(user, db)
+    except IntegrityError as error:
+        await db.rollback()
+        raise UserPhoneAlreadyExistsError from error
 
-        user = User(
-            phone=request.phone,
-            nickname=request.nickname,
-            avatar_url=request.avatar_url,
-            role=UserRole.USER,
-        )
-
-        try:
-            return await self.repository.add(user)
-        except IntegrityError as error:
-            await self.session.rollback()
-            raise UserPhoneAlreadyExistsError from error
+    return UserResponse.model_validate(user)
