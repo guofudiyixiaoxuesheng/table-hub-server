@@ -56,6 +56,7 @@ async def initiate_upload_action(
         resource_type=payload.resource_type,
         name=payload.name,
         description=payload.description,
+        script_genre=payload.script_genre,
         tags=payload.tags,
     )
     version_id = uuid.uuid4()
@@ -92,6 +93,7 @@ async def initiate_upload_action(
             content_type=item.content_type,
             size=item.size,
             last_modified=item.last_modified,
+            sha256=item.sha256,
         )
         for item, relative_path in zip(payload.files, normalized_paths, strict=True)
     ]

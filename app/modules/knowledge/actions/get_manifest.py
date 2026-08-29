@@ -21,6 +21,7 @@ async def get_manifest_action(
         versionId=version.id,
         storeId=document.store_id,
         resourceType=document.resource_type,
+        scriptGenre=document.script_genre,
         name=document.name,
         version=version.version_label,
         description=document.description,

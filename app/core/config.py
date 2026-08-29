@@ -101,6 +101,10 @@ class Settings(BaseSettings):
     TAVILY_API_KEY: str | None = None
     # MINERU_TOKEN
     MINERU_TOKEN: str | None = None
+    MINERU_BASE_URL: str = "https://mineru.net"
+    MINERU_MODEL_VERSION: str = "vlm"
+    MINERU_POLL_INTERVAL_SECONDS: float = 2.0
+    MINERU_POLL_TIMEOUT_SECONDS: float = 120.0
 
     model_config = SettingsConfigDict(
         env_file=BASE_DIR / ".env",

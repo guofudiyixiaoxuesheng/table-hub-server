@@ -41,6 +41,13 @@ class KnowledgeFileStatus(str, enum.Enum):
     VERIFIED = "verified"
 
 
+class KnowledgeParsedFileStatus(str, enum.Enum):
+    PENDING = "pending"
+    PROCESSING = "processing"
+    READY = "ready"
+    FAILED = "failed"
+
+
 class UploadSessionStatus(str, enum.Enum):
     ACTIVE = "active"
     COMPLETED = "completed"
@@ -53,6 +60,16 @@ class KnowledgeResourceType(str, enum.Enum):
     FAQ = "faq"
     ACTIVITY = "activity"
     OTHER = "other"
+
+
+class ScriptGenre(str, enum.Enum):
+    MYSTERY_HARDCORE = "mystery_hardcore"
+    RESTORATION = "restoration"
+    EMOTIONAL = "emotional"
+    MECHANISM = "mechanism"
+    FACTION = "faction"
+    COMEDY = "comedy"
+    HORROR = "horror"
 
 
 class KnowledgeDocument(Base):
@@ -73,6 +90,14 @@ class KnowledgeDocument(Base):
     )
     name: Mapped[str] = mapped_column(String(200), nullable=False)
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    script_genre: Mapped[ScriptGenre | None] = mapped_column(
+        Enum(
+            ScriptGenre,
+            name="script_genre",
+            values_callable=lambda items: [item.value for item in items],
+        ),
+        nullable=True,
+    )
     tags: Mapped[list[str]] = mapped_column(
         JSONB, nullable=False, default=list, server_default="[]"
     )
@@ -160,6 +185,9 @@ class KnowledgeVersion(Base):
     files: Mapped[list[KnowledgeFile]] = relationship(
         back_populates="version", cascade="all, delete-orphan"
     )
+    parsed_files: Mapped[list[KnowledgeParsedFile]] = relationship(
+        back_populates="version", cascade="all, delete-orphan"
+    )
     upload_sessions: Mapped[list[KnowledgeUploadSession]] = relationship(
         back_populates="version", cascade="all, delete-orphan"
     )
@@ -208,6 +236,50 @@ class KnowledgeFile(Base):
     )
 
     version: Mapped[KnowledgeVersion] = relationship(back_populates="files")
+
+
+class KnowledgeParsedFile(Base):
+    __tablename__ = "knowledge_parsed_files"
+    __table_args__ = (
+        UniqueConstraint("file_id", name="uq_knowledge_parsed_files_file_id"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    version_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("knowledge_versions.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    file_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("knowledge_files.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    loader_type: Mapped[str] = mapped_column(String(40), nullable=False)
+    status: Mapped[KnowledgeParsedFileStatus] = mapped_column(
+        Enum(
+            KnowledgeParsedFileStatus,
+            name="knowledge_parsed_file_status",
+            values_callable=lambda items: [item.value for item in items],
+        ),
+        nullable=False,
+        default=KnowledgeParsedFileStatus.PENDING,
+        server_default=KnowledgeParsedFileStatus.PENDING.value,
+    )
+    markdown_key: Mapped[str | None] = mapped_column(String(1024), nullable=True)
+    metadata_key: Mapped[str | None] = mapped_column(String(1024), nullable=True)
+    text_sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    char_count: Mapped[int] = mapped_column(nullable=False, default=0, server_default="0")
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    completed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
+    version: Mapped[KnowledgeVersion] = relationship(back_populates="parsed_files")
+    file: Mapped[KnowledgeFile] = relationship()
 
 
 class KnowledgeUploadSession(Base):

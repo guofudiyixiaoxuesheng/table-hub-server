@@ -1,6 +1,7 @@
 """剧本文件包上传的数据库集成流程。"""
 
 import uuid
+from typing import Any, cast
 
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -9,9 +10,14 @@ from app.core.database import async_engine
 from app.integrations.storage.oss import ObjectMetadata, PresignedUpload
 from app.modules.knowledge.actions import (
     complete_upload_action,
+    delete_document_action,
+    get_loaded_markdown_action,
     get_manifest_action,
     initiate_upload_action,
+    list_loaded_files_action,
+    load_document_action,
 )
+from app.modules.knowledge.exceptions import KnowledgeDocumentNotFoundError
 from app.modules.knowledge.repository import list_documents
 from app.modules.knowledge.schemas import (
     CompleteKnowledgeDocumentUploadRequest,
@@ -23,6 +29,7 @@ class FakeStorage:
     def __init__(self) -> None:
         self.sizes: dict[str, int] = {}
         self.manifests: dict[str, dict[str, object]] = {}
+        self.objects: dict[str, bytes] = {}
 
     def presign_put(self, object_key: str, content_type: str) -> PresignedUpload:
         return PresignedUpload(
@@ -34,13 +41,22 @@ class FakeStorage:
         return ObjectMetadata(
             size=self.sizes[object_key],
             etag="verified-etag",
-            content_type="application/pdf",
+            content_type="text/plain",
         )
 
     async def put_json(
         self, object_key: str, payload: dict[str, object]
     ) -> None:
         self.manifests[object_key] = payload
+
+    async def put_text(self, object_key: str, text: str) -> None:
+        self.objects[object_key] = text.encode()
+
+    async def get_bytes(self, object_key: str) -> bytes:
+        return self.objects[object_key]
+
+    async def get_text(self, object_key: str) -> str:
+        return self.objects[object_key].decode()
 
 
 @pytest.mark.asyncio
@@ -50,24 +66,27 @@ async def test_upload_folder_and_generate_exportable_manifest() -> None:
     payload = InitiateKnowledgeDocumentUploadRequest.model_validate(
         {
             "resourceType": "script",
+            "scriptGenre": "mystery_hardcore",
             "name": "测试剧本",
             "version": "v1",
             "description": "事务内测试，不写真实 OSS",
             "tags": ["推理"],
             "files": [
                 {
-                    "clientFileId": "pdf-1",
-                    "relativePath": "测试剧本/正文.pdf",
+                    "clientFileId": "csv-1",
+                    "relativePath": "测试剧本/第一幕/角色.csv",
                     "size": 128,
-                    "contentType": "application/pdf",
+                    "contentType": "text/csv",
                     "lastModified": 1,
+                    "sha256": "a" * 64,
                 },
                 {
-                    "clientFileId": "cover-1",
-                    "relativePath": "测试剧本/images/cover.jpg",
+                    "clientFileId": "txt-1",
+                    "relativePath": "测试剧本/assets/说明.txt",
                     "size": 64,
-                    "contentType": "image/jpeg",
+                    "contentType": "text/plain",
                     "lastModified": 2,
+                    "sha256": "b" * 64,
                 },
             ],
         }
@@ -89,7 +108,11 @@ async def test_upload_folder_and_generate_exportable_manifest() -> None:
                 CompleteKnowledgeDocumentUploadRequest.model_validate(
                     {
                         "files": [
-                            {"clientFileId": item.client_file_id, "etag": "verified-etag"}
+                            {
+                                "clientFileId": item.client_file_id,
+                                "etag": "verified-etag",
+                                "sha256": item.sha256,
+                            }
                             for item in payload.files
                         ]
                     }
@@ -101,19 +124,54 @@ async def test_upload_folder_and_generate_exportable_manifest() -> None:
             manifest = await get_manifest_action(
                 initiated.document_id, initiated.version_id, store_id, session
             )
+            for target in initiated.files:
+                storage.objects[target.object_key] = b"title,role\nAlice,detective\n"
+            loaded = await load_document_action(
+                initiated.document_id,
+                initiated.version_id,
+                store_id,
+                session,
+                storage,  # type: ignore[arg-type]
+            )
+            loaded_again = await list_loaded_files_action(
+                initiated.document_id, initiated.version_id, store_id, session
+            )
+            markdown = await get_loaded_markdown_action(
+                initiated.document_id,
+                initiated.version_id,
+                loaded.files[0].id,
+                store_id,
+                session,
+                storage,  # type: ignore[arg-type]
+            )
             documents = await list_documents(store_id, None, session)
 
             assert completed.status == "uploaded"
             assert manifest.status == "uploaded"
             assert len(manifest.files) == 2
             assert manifest.resource_type.value == "script"
+            assert manifest.script_genre is not None
+            assert manifest.script_genre.value == "mystery_hardcore"
+            assert len(loaded.files) == 2
+            assert loaded.files[0].status == "ready"
+            assert len(loaded_again.files) == 2
+            assert "Alice" in markdown.markdown
             assert len(documents) == 1
             assert documents[0][0].name == "测试剧本"
-            assert next(iter(storage.manifests.values()))["name"] == "测试剧本"
+            saved_manifest = next(iter(storage.manifests.values()))
+            saved_files = cast(list[dict[str, Any]], saved_manifest["files"])
+            assert saved_manifest["name"] == "测试剧本"
+            assert saved_manifest["scriptGenre"] == "mystery_hardcore"
+            assert saved_files[0]["sha256"] == "a" * 64
             assert all(
                 target.object_key.startswith(f"stores/{store_id}/knowledge/")
                 for target in initiated.files
             )
+
+            await delete_document_action(initiated.document_id, store_id, session)
+            assert await list_documents(store_id, None, session) == []
+            with pytest.raises(KnowledgeDocumentNotFoundError):
+                await delete_document_action(initiated.document_id, store_id, session)
         finally:
             await session.close()
             await transaction.rollback()

@@ -9,6 +9,7 @@ from sqlalchemy.orm import selectinload
 from app.modules.knowledge.models import (
     KnowledgeDocument,
     KnowledgeFile,
+    KnowledgeParsedFile,
     KnowledgeUploadSession,
     KnowledgeVersion,
 )
@@ -44,6 +45,25 @@ async def get_document(
         KnowledgeDocument.id == document_id,
         KnowledgeDocument.store_id == store_id,
         KnowledgeDocument.deleted_at.is_(None),
+    )
+    return await db.scalar(statement)
+
+
+async def get_document_with_versions(
+    document_id: uuid.UUID, store_id: uuid.UUID, db: AsyncSession
+) -> KnowledgeDocument | None:
+    statement = (
+        select(KnowledgeDocument)
+        .where(
+            KnowledgeDocument.id == document_id,
+            KnowledgeDocument.store_id == store_id,
+            KnowledgeDocument.deleted_at.is_(None),
+        )
+        .options(
+            selectinload(KnowledgeDocument.versions).selectinload(
+                KnowledgeVersion.upload_sessions
+            )
+        )
     )
     return await db.scalar(statement)
 
@@ -105,6 +125,9 @@ async def get_version_for_manifest(
         .options(
             selectinload(KnowledgeVersion.document),
             selectinload(KnowledgeVersion.files),
+            selectinload(KnowledgeVersion.parsed_files).selectinload(
+                KnowledgeParsedFile.file
+            ),
         )
     )
     return await db.scalar(statement)

@@ -82,6 +82,17 @@ class OssStorage:
             },
         )
 
+    def presign_get(self, object_key: str) -> str:
+        """生成短期有效的对象读取 URL，用于后端解析服务读取源文件。"""
+
+        result = self.client.presign(
+            oss.GetObjectRequest(bucket=self.bucket, key=object_key),
+            expires=timedelta(seconds=settings.OSS_PRESIGN_EXPIRES_SECONDS),
+        )
+        if not result.url:
+            raise RuntimeError("OSS 未返回预签名下载 URL")
+        return result.url
+
     async def head_object(self, object_key: str) -> ObjectMetadata:
         """读取对象元数据；SDK 同步请求放入工作线程。"""
 
@@ -99,12 +110,43 @@ class OssStorage:
         """将版本清单写入 OSS。"""
 
         body = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode()
+        await self.put_bytes(object_key, body, "application/json; charset=utf-8")
+
+    async def put_text(self, object_key: str, text: str) -> None:
+        """将文本对象写入 OSS。"""
+
+        await self.put_bytes(object_key, text.encode("utf-8"), "text/markdown; charset=utf-8")
+
+    async def put_bytes(
+        self, object_key: str, body: bytes, content_type: str
+    ) -> None:
+        """将二进制对象写入 OSS。"""
+
         await asyncio.to_thread(
             self.client.put_object,
             oss.PutObjectRequest(
                 bucket=self.bucket,
                 key=object_key,
                 body=body,
-                content_type="application/json; charset=utf-8",
+                content_type=content_type,
             ),
         )
+
+    async def get_bytes(self, object_key: str) -> bytes:
+        """读取 OSS 对象内容。"""
+
+        result = await asyncio.to_thread(
+            self.client.get_object,
+            oss.GetObjectRequest(bucket=self.bucket, key=object_key),
+        )
+        body = result.body
+        data = await asyncio.to_thread(body.read)
+        close = getattr(body, "close", None)
+        if close:
+            await asyncio.to_thread(close)
+        return bytes(data)
+
+    async def get_text(self, object_key: str) -> str:
+        """读取 UTF-8 文本对象。"""
+
+        return (await self.get_bytes(object_key)).decode("utf-8")

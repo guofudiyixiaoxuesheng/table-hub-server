@@ -67,7 +67,12 @@ async def complete_upload_action(
         oss_storage, [file.object_key for file in version.files]
     )
     for file, metadata in zip(version.files, metadata_list, strict=True):
-        client_etag = reported[file.client_file_id].etag.strip('"')
+        reported_file = reported[file.client_file_id]
+        client_etag = reported_file.etag.strip('"')
+        if file.sha256 and reported_file.sha256 != file.sha256:
+            raise KnowledgeDocumentUploadError(
+                f"文件 SHA256 不一致：{file.relative_path}"
+            )
         if metadata.size != file.size:
             raise KnowledgeDocumentUploadError(f"OSS 文件大小不一致：{file.relative_path}")
         if client_etag and metadata.etag and client_etag != metadata.etag:
@@ -83,6 +88,7 @@ async def complete_upload_action(
         "versionId": str(version.id),
         "storeId": str(document.store_id),
         "resourceType": document.resource_type,
+        "scriptGenre": document.script_genre,
         "name": document.name,
         "version": version.version_label,
         "description": document.description,
@@ -97,6 +103,7 @@ async def complete_upload_action(
                 "size": file.size,
                 "lastModified": file.last_modified,
                 "etag": file.etag,
+                "sha256": file.sha256,
             }
             for file in version.files
         ],

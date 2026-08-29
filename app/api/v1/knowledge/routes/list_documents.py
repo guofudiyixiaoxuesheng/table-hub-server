@@ -32,6 +32,7 @@ async def get_knowledge_documents(
         KnowledgeDocumentListItem(
             id=document.id,
             resourceType=document.resource_type,
+            scriptGenre=document.script_genre,
             name=document.name,
             description=document.description,
             tags=document.tags,
