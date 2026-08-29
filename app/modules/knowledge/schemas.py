@@ -115,6 +115,7 @@ class ParsedKnowledgeFileResponse(BaseModel):
     markdown_key: str | None = Field(default=None, alias="markdownKey")
     text_sha256: str | None = Field(default=None, alias="textSha256")
     char_count: int = Field(alias="charCount")
+    asset_count: int = Field(alias="assetCount")
     error_message: str | None = Field(default=None, alias="errorMessage")
     completed_at: datetime | None = Field(default=None, alias="completedAt")
 
@@ -134,6 +135,112 @@ class ParsedMarkdownResponse(BaseModel):
     file_id: uuid.UUID = Field(alias="fileId")
     relative_path: str = Field(alias="relativePath")
     markdown: str
+
+
+class AssetPreviewUrlResponse(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    asset_id: uuid.UUID = Field(alias="assetId")
+    preview_url: str = Field(alias="previewUrl")
+
+
+class KnowledgeChunkResponse(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    id: uuid.UUID
+    document_id: uuid.UUID = Field(alias="documentId")
+    version_id: uuid.UUID = Field(alias="versionId")
+    parsed_file_id: uuid.UUID = Field(alias="parsedFileId")
+    file_id: uuid.UUID = Field(alias="fileId")
+    relative_path: str = Field(alias="relativePath")
+    chunk_index: int = Field(alias="chunkIndex")
+    chunk_type: str = Field(alias="chunkType")
+    status: str
+    title: str | None
+    act: str | None
+    role_name: str | None = Field(alias="roleName")
+    content: str
+    content_sha256: str = Field(alias="contentSha256")
+    char_count: int = Field(alias="charCount")
+    metadata: dict[str, object]
+    created_at: datetime = Field(alias="createdAt")
+
+
+class KnowledgeChunkFileSummary(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    file_id: uuid.UUID = Field(alias="fileId")
+    parsed_file_id: uuid.UUID = Field(alias="parsedFileId")
+    relative_path: str = Field(alias="relativePath")
+    role_name: str | None = Field(alias="roleName")
+    acts: list[str]
+    chunk_count: int = Field(alias="chunkCount")
+    type_counts: dict[str, int] = Field(alias="typeCounts")
+    status: str
+    updated_at: datetime | None = Field(alias="updatedAt")
+
+
+class KnowledgeChunkListResponse(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    document_id: uuid.UUID = Field(alias="documentId")
+    version_id: uuid.UUID = Field(alias="versionId")
+    total_chunks: int = Field(alias="totalChunks")
+    chunked_files: int = Field(alias="chunkedFiles")
+    total_files: int = Field(alias="totalFiles")
+    type_counts: dict[str, int] = Field(alias="typeCounts")
+    files: list[KnowledgeChunkFileSummary]
+    chunks: list[KnowledgeChunkResponse]
+
+
+class KnowledgeEmbeddingSummaryResponse(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    document_id: uuid.UUID = Field(alias="documentId")
+    version_id: uuid.UUID = Field(alias="versionId")
+    model: str
+    dimension: int
+    total_chunks: int = Field(alias="totalChunks")
+    embedded_chunks: int = Field(alias="embeddedChunks")
+    failed_chunks: int = Field(alias="failedChunks")
+    pending_chunks: int = Field(alias="pendingChunks")
+    updated_at: datetime | None = Field(alias="updatedAt")
+
+
+class KnowledgeRetrieveRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    query: str = Field(min_length=1, max_length=500)
+    top_k: int = Field(default=8, alias="topK", ge=1, le=30)
+    mode: str = Field(default="hybrid", pattern=r"^(bm25|vector|hybrid)$")
+    role_name: str | None = Field(default=None, alias="roleName", max_length=120)
+    act: str | None = Field(default=None, max_length=80)
+    chunk_type: str | None = Field(default=None, alias="chunkType", max_length=40)
+
+
+class KnowledgeRetrievedChunk(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    chunk_id: uuid.UUID = Field(alias="chunkId")
+    file_id: uuid.UUID = Field(alias="fileId")
+    relative_path: str = Field(alias="relativePath")
+    title: str | None
+    act: str | None
+    role_name: str | None = Field(alias="roleName")
+    chunk_type: str = Field(alias="chunkType")
+    content: str
+    score: float
+    score_type: str = Field(alias="scoreType")
+
+
+class KnowledgeRetrieveResponse(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    document_id: uuid.UUID = Field(alias="documentId")
+    version_id: uuid.UUID = Field(alias="versionId")
+    query: str
+    mode: str
+    results: list[KnowledgeRetrievedChunk]
 
 
 class KnowledgeDocumentListItem(BaseModel):

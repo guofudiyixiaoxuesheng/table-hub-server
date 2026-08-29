@@ -96,6 +96,7 @@ async def complete_upload_action(
         "createdAt": version.created_at.isoformat(),
         "files": [
             {
+                "fileId": str(file.id),
                 "clientFileId": file.client_file_id,
                 "relativePath": file.relative_path,
                 "objectKey": file.object_key,

@@ -29,6 +29,7 @@ async def get_manifest_action(
         status=version.status.value,
         files=[
             {
+                "fileId": str(file.id),
                 "clientFileId": file.client_file_id,
                 "relativePath": file.relative_path,
                 "objectKey": file.object_key,

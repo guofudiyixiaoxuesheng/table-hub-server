@@ -88,6 +88,14 @@ async def test_upload_folder_and_generate_exportable_manifest() -> None:
                     "lastModified": 2,
                     "sha256": "b" * 64,
                 },
+                {
+                    "clientFileId": "image-1",
+                    "relativePath": "测试剧本/assets/现场.png",
+                    "size": 32,
+                    "contentType": "image/png",
+                    "lastModified": 3,
+                    "sha256": "c" * 64,
+                },
             ],
         }
     )
@@ -139,7 +147,11 @@ async def test_upload_folder_and_generate_exportable_manifest() -> None:
             markdown = await get_loaded_markdown_action(
                 initiated.document_id,
                 initiated.version_id,
-                loaded.files[0].id,
+                next(
+                    file
+                    for file in loaded.files
+                    if file.relative_path.endswith("角色.csv")
+                ).id,
                 store_id,
                 session,
                 storage,  # type: ignore[arg-type]
@@ -148,13 +160,19 @@ async def test_upload_folder_and_generate_exportable_manifest() -> None:
 
             assert completed.status == "uploaded"
             assert manifest.status == "uploaded"
-            assert len(manifest.files) == 2
+            assert len(manifest.files) == 3
             assert manifest.resource_type.value == "script"
             assert manifest.script_genre is not None
             assert manifest.script_genre.value == "mystery_hardcore"
-            assert len(loaded.files) == 2
+            assert len(loaded.files) == 3
             assert loaded.files[0].status == "ready"
-            assert len(loaded_again.files) == 2
+            assert len(loaded_again.files) == 3
+            assert (
+                next(
+                    file for file in loaded.files if file.loader_type == "image_asset"
+                ).asset_count
+                == 1
+            )
             assert "Alice" in markdown.markdown
             assert len(documents) == 1
             assert documents[0][0].name == "测试剧本"

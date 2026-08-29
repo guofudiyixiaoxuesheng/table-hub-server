@@ -23,14 +23,26 @@ class LoadedMarkdown:
 def detect_loader_type(file: KnowledgeFile) -> str:
     suffix = PurePosixPath(file.relative_path).suffix.lower()
     content_type = file.content_type.lower()
+    if suffix in {
+        ".jpg",
+        ".jpeg",
+        ".jfif",
+        ".png",
+        ".webp",
+        ".gif",
+        ".bmp",
+        ".heic",
+        ".heif",
+    } or content_type.startswith("image/"):
+        return "image_asset"
     if suffix == ".pdf" or content_type == "application/pdf":
         return "mineru_pdf"
     if suffix in {".docx", ".doc"}:
         return "docx"
-    if suffix in {".txt", ".md"} or content_type.startswith("text/"):
-        return "text"
     if suffix == ".csv" or "csv" in content_type:
         return "csv"
+    if suffix in {".txt", ".md"} or content_type.startswith("text/"):
+        return "text"
     return "unsupported"
 
 

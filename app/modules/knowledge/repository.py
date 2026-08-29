@@ -7,8 +7,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.modules.knowledge.models import (
+    KnowledgeChunk,
+    KnowledgeChunkEmbedding,
     KnowledgeDocument,
     KnowledgeFile,
+    KnowledgeParsedAsset,
     KnowledgeParsedFile,
     KnowledgeUploadSession,
     KnowledgeVersion,
@@ -128,6 +131,38 @@ async def get_version_for_manifest(
             selectinload(KnowledgeVersion.parsed_files).selectinload(
                 KnowledgeParsedFile.file
             ),
+            selectinload(KnowledgeVersion.parsed_files).selectinload(
+                KnowledgeParsedFile.assets
+            ),
+            selectinload(KnowledgeVersion.parsed_assets).selectinload(
+                KnowledgeParsedAsset.source_file
+            ),
+            selectinload(KnowledgeVersion.chunks).selectinload(KnowledgeChunk.file),
+            selectinload(KnowledgeVersion.chunks).selectinload(
+                KnowledgeChunk.parsed_file
+            ),
+            selectinload(KnowledgeVersion.chunks).selectinload(
+                KnowledgeChunk.embeddings
+            ),
+            selectinload(KnowledgeVersion.chunk_embeddings).selectinload(
+                KnowledgeChunkEmbedding.chunk
+            ),
+        )
+    )
+    return await db.scalar(statement)
+
+
+async def get_parsed_asset(
+    asset_id: uuid.UUID, store_id: uuid.UUID, db: AsyncSession
+) -> KnowledgeParsedAsset | None:
+    statement = (
+        select(KnowledgeParsedAsset)
+        .join(KnowledgeVersion, KnowledgeParsedAsset.version_id == KnowledgeVersion.id)
+        .join(KnowledgeDocument, KnowledgeVersion.document_id == KnowledgeDocument.id)
+        .where(
+            KnowledgeParsedAsset.id == asset_id,
+            KnowledgeDocument.store_id == store_id,
+            KnowledgeDocument.deleted_at.is_(None),
         )
     )
     return await db.scalar(statement)

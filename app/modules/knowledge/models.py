@@ -12,6 +12,7 @@ from sqlalchemy import (
     Enum,
     ForeignKey,
     Index,
+    Integer,
     String,
     Text,
     UniqueConstraint,
@@ -19,8 +20,39 @@ from sqlalchemy import (
 )
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
+from sqlalchemy.types import UserDefinedType
 
+from app.core.config import settings
 from app.core.database import Base
+
+
+class PgVector(UserDefinedType[list[float]]):
+    cache_ok = True
+
+    def __init__(self, dimensions: int) -> None:
+        self.dimensions = dimensions
+
+    def get_col_spec(self, **_: object) -> str:
+        return f"vector({self.dimensions})"
+
+    def bind_processor(self, dialect):
+        def process(value: list[float] | None) -> str | None:
+            if value is None:
+                return None
+            return "[" + ",".join(str(item) for item in value) + "]"
+
+        return process
+
+    def result_processor(self, dialect, coltype):
+        def process(value: object) -> list[float] | None:
+            if value is None:
+                return None
+            if isinstance(value, list):
+                return [float(item) for item in value]
+            text = str(value).strip("[]")
+            return [float(item) for item in text.split(",") if item]
+
+        return process
 
 
 class KnowledgeDocumentStatus(str, enum.Enum):
@@ -46,6 +78,31 @@ class KnowledgeParsedFileStatus(str, enum.Enum):
     PROCESSING = "processing"
     READY = "ready"
     FAILED = "failed"
+
+
+class KnowledgeParsedAssetType(str, enum.Enum):
+    IMAGE = "image"
+    TABLE = "table"
+    FORMULA = "formula"
+
+
+class KnowledgeChunkStatus(str, enum.Enum):
+    READY = "ready"
+    FAILED = "failed"
+
+
+class KnowledgeEmbeddingStatus(str, enum.Enum):
+    READY = "ready"
+    FAILED = "failed"
+
+
+class KnowledgeChunkType(str, enum.Enum):
+    STORY = "story"
+    TASK = "task"
+    CHARACTER_IMPRESSION = "character_impression"
+    RULE = "rule"
+    IMAGE = "image"
+    NOTE = "note"
 
 
 class UploadSessionStatus(str, enum.Enum):
@@ -188,6 +245,15 @@ class KnowledgeVersion(Base):
     parsed_files: Mapped[list[KnowledgeParsedFile]] = relationship(
         back_populates="version", cascade="all, delete-orphan"
     )
+    parsed_assets: Mapped[list[KnowledgeParsedAsset]] = relationship(
+        back_populates="version", cascade="all, delete-orphan"
+    )
+    chunks: Mapped[list[KnowledgeChunk]] = relationship(
+        back_populates="version", cascade="all, delete-orphan"
+    )
+    chunk_embeddings: Mapped[list[KnowledgeChunkEmbedding]] = relationship(
+        back_populates="version", cascade="all, delete-orphan"
+    )
     upload_sessions: Mapped[list[KnowledgeUploadSession]] = relationship(
         back_populates="version", cascade="all, delete-orphan"
     )
@@ -279,6 +345,210 @@ class KnowledgeParsedFile(Base):
     )
 
     version: Mapped[KnowledgeVersion] = relationship(back_populates="parsed_files")
+    file: Mapped[KnowledgeFile] = relationship()
+    assets: Mapped[list[KnowledgeParsedAsset]] = relationship(
+        back_populates="parsed_file", cascade="all, delete-orphan"
+    )
+    chunks: Mapped[list[KnowledgeChunk]] = relationship(
+        back_populates="parsed_file", cascade="all, delete-orphan"
+    )
+
+
+class KnowledgeParsedAsset(Base):
+    __tablename__ = "knowledge_parsed_assets"
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    version_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("knowledge_versions.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    parsed_file_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("knowledge_parsed_files.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    source_file_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("knowledge_files.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    asset_type: Mapped[KnowledgeParsedAssetType] = mapped_column(
+        Enum(
+            KnowledgeParsedAssetType,
+            name="knowledge_parsed_asset_type",
+            values_callable=lambda items: [item.value for item in items],
+        ),
+        nullable=False,
+        default=KnowledgeParsedAssetType.IMAGE,
+        server_default=KnowledgeParsedAssetType.IMAGE.value,
+    )
+    asset_key: Mapped[str] = mapped_column(String(1024), nullable=False)
+    original_ref: Mapped[str | None] = mapped_column(String(1024), nullable=True)
+    page_number: Mapped[int | None] = mapped_column(nullable=True)
+    caption: Mapped[str | None] = mapped_column(Text, nullable=True)
+    ocr_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    vlm_description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    extra_metadata: Mapped[dict[str, object]] = mapped_column(
+        "metadata", JSONB, nullable=False, default=dict, server_default="{}"
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    version: Mapped[KnowledgeVersion] = relationship(back_populates="parsed_assets")
+    parsed_file: Mapped[KnowledgeParsedFile] = relationship(back_populates="assets")
+    source_file: Mapped[KnowledgeFile] = relationship()
+
+
+class KnowledgeChunk(Base):
+    __tablename__ = "knowledge_chunks"
+    __table_args__ = (
+        UniqueConstraint(
+            "parsed_file_id",
+            "chunk_index",
+            name="uq_knowledge_chunks_parsed_file_index",
+        ),
+        Index("ix_knowledge_chunks_version_type", "version_id", "chunk_type"),
+        Index("ix_knowledge_chunks_role_act", "role_name", "act"),
+        Index(
+            "ix_knowledge_chunks_bm25",
+            "id",
+            "title",
+            "content",
+            "act",
+            "role_name",
+            "chunk_type",
+            "version_id",
+            "file_id",
+            postgresql_using="bm25",
+            postgresql_with={"key_field": "id"},
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    document_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("knowledge_documents.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    version_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("knowledge_versions.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    parsed_file_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("knowledge_parsed_files.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    file_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("knowledge_files.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    chunk_index: Mapped[int] = mapped_column(Integer, nullable=False)
+    chunk_type: Mapped[KnowledgeChunkType] = mapped_column(
+        Enum(
+            KnowledgeChunkType,
+            name="knowledge_chunk_type",
+            values_callable=lambda items: [item.value for item in items],
+        ),
+        nullable=False,
+        default=KnowledgeChunkType.NOTE,
+        server_default=KnowledgeChunkType.NOTE.value,
+    )
+    status: Mapped[KnowledgeChunkStatus] = mapped_column(
+        Enum(
+            KnowledgeChunkStatus,
+            name="knowledge_chunk_status",
+            values_callable=lambda items: [item.value for item in items],
+        ),
+        nullable=False,
+        default=KnowledgeChunkStatus.READY,
+        server_default=KnowledgeChunkStatus.READY.value,
+    )
+    title: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    act: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    role_name: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    content: Mapped[str] = mapped_column(Text, nullable=False)
+    content_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    char_count: Mapped[int] = mapped_column(nullable=False, default=0, server_default="0")
+    extra_metadata: Mapped[dict[str, object]] = mapped_column(
+        "metadata", JSONB, nullable=False, default=dict, server_default="{}"
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    version: Mapped[KnowledgeVersion] = relationship(back_populates="chunks")
+    parsed_file: Mapped[KnowledgeParsedFile] = relationship(back_populates="chunks")
+    file: Mapped[KnowledgeFile] = relationship()
+    embeddings: Mapped[list[KnowledgeChunkEmbedding]] = relationship(
+        back_populates="chunk", cascade="all, delete-orphan"
+    )
+
+
+class KnowledgeChunkEmbedding(Base):
+    __tablename__ = "knowledge_chunk_embeddings"
+    __table_args__ = (
+        UniqueConstraint(
+            "chunk_id",
+            "embedding_model",
+            name="uq_knowledge_chunk_embeddings_chunk_model",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    chunk_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("knowledge_chunks.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    document_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("knowledge_documents.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    version_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("knowledge_versions.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    file_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("knowledge_files.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    embedding_model: Mapped[str] = mapped_column(String(120), nullable=False)
+    embedding_dimension: Mapped[int] = mapped_column(nullable=False)
+    embedding: Mapped[list[float]] = mapped_column(
+        PgVector(settings.EMBEDDING_DIMENSION), nullable=False
+    )
+    content_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    status: Mapped[KnowledgeEmbeddingStatus] = mapped_column(
+        Enum(
+            KnowledgeEmbeddingStatus,
+            name="knowledge_embedding_status",
+            values_callable=lambda items: [item.value for item in items],
+        ),
+        nullable=False,
+        default=KnowledgeEmbeddingStatus.READY,
+        server_default=KnowledgeEmbeddingStatus.READY.value,
+    )
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
+
+    chunk: Mapped[KnowledgeChunk] = relationship(back_populates="embeddings")
+    version: Mapped[KnowledgeVersion] = relationship(back_populates="chunk_embeddings")
     file: Mapped[KnowledgeFile] = relationship()
 
 
