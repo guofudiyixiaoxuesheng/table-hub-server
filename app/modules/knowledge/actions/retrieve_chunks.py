@@ -10,7 +10,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
 from app.integrations.qwen.embedding import QwenEmbeddingClient
-from app.modules.knowledge.exceptions import KnowledgeDocumentNotFoundError
+from app.integrations.qwen.rerank import QwenRerankClient
+from app.modules.knowledge.exceptions import (
+    KnowledgeDocumentNotFoundError,
+    KnowledgeDocumentUploadError,
+)
 from app.modules.knowledge.repository import get_version_for_manifest
 from app.modules.knowledge.schemas import (
     KnowledgeRetrievedChunk,
@@ -162,21 +166,96 @@ async def _vector_search(
     ]
 
 
+RRF_K = 60
+
+
 def _merge_results(rows: list[RetrievedRow], top_k: int) -> list[RetrievedRow]:
+    """单路召回去重：保留同一 chunk 在当前召回方式下的最高分。"""
     merged: dict[uuid.UUID, RetrievedRow] = {}
     for row in rows:
         current = merged.get(row.chunk_id)
         if current is None or row.score > current.score:
             merged[row.chunk_id] = row
-        elif current.score_type != row.score_type:
-            merged[row.chunk_id] = RetrievedRow(
+    return sorted(merged.values(), key=lambda item: item.score, reverse=True)[:top_k]
+
+
+def reciprocal_rank_fusion(
+    ranked_lists: list[list[RetrievedRow]],
+    *,
+    top_k: int,
+    k: int = RRF_K,
+) -> list[RetrievedRow]:
+    """用 RRF 融合多路召回结果。
+
+    RRF 只关心每个 chunk 在每一路召回中的排名，不直接混加 BM25/向量原始分。
+    同一个 chunk 被多路召回命中时，分数会累加，所以更容易排到前面。
+    """
+    fused: dict[uuid.UUID, tuple[RetrievedRow, float, set[str]]] = {}
+
+    for ranked_rows in ranked_lists:
+        seen_in_channel: set[uuid.UUID] = set()
+        for rank, row in enumerate(ranked_rows, start=1):
+            if row.chunk_id in seen_in_channel:
+                continue
+            seen_in_channel.add(row.chunk_id)
+
+            base_row, current_score, score_types = fused.get(
+                row.chunk_id, (row, 0.0, set())
+            )
+            if row.score > base_row.score:
+                base_row = row
+            score_types.add(row.score_type)
+            fused[row.chunk_id] = (
+                base_row,
+                current_score + 1 / (k + rank),
+                score_types,
+            )
+
+    results = [
+        RetrievedRow(
+            **{
+                **asdict(row),
+                "score": score,
+                "score_type": "rrf" if len(score_types) > 1 else next(iter(score_types)),
+            }
+        )
+        for row, score, score_types in fused.values()
+    ]
+    return sorted(results, key=lambda item: item.score, reverse=True)[:top_k]
+
+
+async def rerank_results(
+    *,
+    query: str,
+    rows: list[RetrievedRow],
+    top_k: int,
+    client: QwenRerankClient | None = None,
+) -> list[RetrievedRow]:
+    """对召回候选做精排。外部调用由 RERANK_ENABLED 显式控制。"""
+    if not rows or not settings.RERANK_ENABLED:
+        return []
+
+    reranker = client or QwenRerankClient()
+    reranked = await reranker.rerank(
+        query=query,
+        documents=[row.content for row in rows],
+        top_n=min(top_k, settings.RERANK_TOP_N, len(rows)),
+    )
+    selected: list[RetrievedRow] = []
+    for item in reranked:
+        if item.index >= len(rows) or item.relevance_score < settings.RERANK_MIN_SCORE:
+            continue
+        row = rows[item.index]
+        selected.append(
+            RetrievedRow(
                 **{
-                    **asdict(current),
-                    "score": current.score + row.score,
-                    "score_type": "hybrid",
+                    **asdict(row),
+                    "score": item.relevance_score,
+                    "score_type": "rerank",
                 }
             )
-    return sorted(merged.values(), key=lambda item: item.score, reverse=True)[:top_k]
+        )
+    return selected[:top_k]
 
 
 class KnowledgeRetriever:
@@ -184,9 +263,11 @@ class KnowledgeRetriever:
         self,
         db: AsyncSession,
         embedding_client: QwenEmbeddingClient | None = None,
+        rerank_client: QwenRerankClient | None = None,
     ) -> None:
         self.db = db
         self.embedding_client = embedding_client
+        self.rerank_client = rerank_client
 
     async def retrieve(
         self,
@@ -199,21 +280,36 @@ class KnowledgeRetriever:
         if version is None:
             raise KnowledgeDocumentNotFoundError("知识库版本不存在")
 
-        rows: list[RetrievedRow] = []
+        candidate_top_k = min(max(payload.top_k * 4, settings.RERANK_TOP_N), 30)
+        candidate_payload = payload.model_copy(update={"top_k": candidate_top_k})
+        bm25_rows: list[RetrievedRow] = []
+        vector_rows: list[RetrievedRow] = []
         if payload.mode in {"bm25", "hybrid"}:
-            rows.extend(
-                await _bm25_search(version_id=version_id, payload=payload, db=self.db)
+            bm25_rows = await _bm25_search(
+                version_id=version_id, payload=candidate_payload, db=self.db
             )
         if payload.mode in {"vector", "hybrid"}:
-            rows.extend(
-                await _vector_search(
-                    version_id=version_id,
-                    payload=payload,
-                    db=self.db,
-                    client=self.embedding_client,
-                )
+            vector_rows = await _vector_search(
+                version_id=version_id,
+                payload=candidate_payload,
+                db=self.db,
+                client=self.embedding_client,
             )
-        merged = _merge_results(rows, payload.top_k)
+        merged = (
+            reciprocal_rank_fusion([bm25_rows, vector_rows], top_k=candidate_top_k)
+            if payload.mode == "hybrid"
+            else _merge_results(bm25_rows or vector_rows, candidate_top_k)
+        )
+        try:
+            reranked = await rerank_results(
+                query=payload.query,
+                rows=merged,
+                top_k=payload.top_k,
+                client=self.rerank_client,
+            )
+            merged = reranked or merged[: payload.top_k]
+        except KnowledgeDocumentUploadError:
+            merged = merged[: payload.top_k]
         return KnowledgeRetrieveResponse(
             documentId=document_id,
             versionId=version_id,

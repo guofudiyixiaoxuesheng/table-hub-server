@@ -15,6 +15,7 @@ from app.modules.auth.models import (  # noqa: F401
     StoreInvite,
     StoreMember,
 )
+from app.modules.chat.models import ChatMessage, ChatSession  # noqa: F401
 from app.modules.knowledge.models import KnowledgeDocument  # noqa: F401
 from app.modules.user.models import User  # noqa: F401
 
@@ -30,7 +31,15 @@ target_metadata = Base.metadata
 def include_object(object_, name, type_, reflected, compare_to) -> bool:
     """忽略由 PostGIS 扩展维护的系统表。"""
 
-    return not (type_ == "table" and name == "spatial_ref_sys")
+    langgraph_tables = {
+        "checkpoints",
+        "checkpoint_blobs",
+        "checkpoint_writes",
+        "checkpoint_migrations",
+    }
+    if type_ == "table" and name in {"spatial_ref_sys", *langgraph_tables}:
+        return False
+    return not (type_ == "index" and name.startswith("checkpoint_"))
 
 
 def run_migrations_offline() -> None:

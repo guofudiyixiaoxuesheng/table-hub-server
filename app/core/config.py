@@ -60,6 +60,7 @@ class Settings(BaseSettings):
     EMBEDDING_MODEL: str = "text-embedding-v4"
     EMBEDDING_DIMENSION: int = 1024
     EMBEDDING_BATCH_SIZE: int = 10
+    RERANK_ENABLED: bool = True
     RERANK_MODEL: str = "qwen3-rerank"
     RERANK_API_URL: str = ""
     RERANK_TOP_N: int = 5

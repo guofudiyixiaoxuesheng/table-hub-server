@@ -3,18 +3,22 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from app.ai.graph import build_parent_graph
 from app.api.v1.router import router as api_v1_router
+from app.core.checkpoint import checkpoint_lifespan
 from app.core.config import settings
 from app.core.database import check_database_connection, close_database_connection
 from app.core.exception_handlers import register_exception_handlers
 
 
 @asynccontextmanager
-async def lifespan(_: FastAPI):
+async def lifespan(app: FastAPI):
     """启动时验证数据库，关闭时释放连接池。"""
 
     await check_database_connection()
-    yield
+    async with checkpoint_lifespan() as checkpointer:
+        app.state.parent_graph = build_parent_graph(checkpointer=checkpointer)
+        yield
     await close_database_connection()
 
 
