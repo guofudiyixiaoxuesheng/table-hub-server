@@ -258,3 +258,12 @@ class KnowledgeDocumentListItem(BaseModel):
     file_count: int = Field(alias="fileCount")
     total_size: int = Field(alias="totalSize")
     updated_at: datetime = Field(alias="updatedAt")
+
+
+class KnowledgeDocumentSearchResult(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    items: list[KnowledgeDocumentListItem]
+    total: int
+    page: int
+    page_size: int = Field(alias="pageSize")

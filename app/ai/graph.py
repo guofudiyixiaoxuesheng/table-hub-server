@@ -63,11 +63,11 @@ def build_parent_graph(checkpointer: BaseCheckpointSaver | None = None):
 
 
 async def run_parent_graph(
-    graph, state: ParentGraphState, thread_id: str
+    graph, state: ParentGraphState, thread_id: str, **configurable: Any
 ) -> ParentGraphState:
     return await graph.ainvoke(
         state,
-        config={"configurable": {"thread_id": thread_id}},
+        config={"configurable": {"thread_id": thread_id, **configurable}},
     )
 
 
@@ -76,10 +76,14 @@ async def stream_parent_graph(
     state: ParentGraphState,
     thread_id: str,
     stream_mode: Literal["updates", "values"] = "updates",
+    **configurable: Any,
 ) -> AsyncIterator[Any]:
+    graph_stream_mode: Any = (
+        ["updates", "custom"] if stream_mode == "updates" else stream_mode
+    )
     async for event in graph.astream(
         state,
-        config={"configurable": {"thread_id": thread_id}},
-        stream_mode=stream_mode,
+        config={"configurable": {"thread_id": thread_id, **configurable}},
+        stream_mode=graph_stream_mode,
     ):
         yield event

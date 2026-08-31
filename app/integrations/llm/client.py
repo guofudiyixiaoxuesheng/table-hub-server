@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
 from typing import Any
 
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
@@ -75,6 +76,25 @@ async def chat_completion(
         kwargs["response_format"] = response_format
     result = await model.ainvoke([_to_base_message(item) for item in messages], **kwargs)
     return _normalize_content(result.content)
+
+
+async def stream_chat_completion(
+    messages: list[ChatMessageInput],
+    *,
+    temperature: float = 0,
+    max_tokens: int = 512,
+) -> AsyncIterator[str]:
+    """流式调用聊天模型，逐段产出文本 token/chunk。
+
+    这个函数只负责模型层流式；上层可以把 chunk 转成 SSE、WebSocket 或
+    LangGraph custom stream event。
+    """
+
+    model = _get_chat_model(temperature=temperature, max_tokens=max_tokens)
+    async for chunk in model.astream([_to_base_message(item) for item in messages]):
+        content = _normalize_content(chunk.content)
+        if content:
+            yield content
 
 
 async def structured_chat_completion[StructuredOutputT: BaseModel](

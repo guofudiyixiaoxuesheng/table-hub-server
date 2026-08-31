@@ -111,6 +111,22 @@ def _merge_update_event(state: dict[str, Any], event: Any) -> dict[str, Any]:
     return state
 
 
+def _split_stream_event(event: Any) -> tuple[str | None, Any]:
+    """兼容 LangGraph 单 stream_mode 和多 stream_mode 的事件形态。
+
+    stream_mode=["updates", "custom"] 时，LangGraph 会返回：
+    ("updates", {...}) 或 ("custom", {...})。
+    """
+
+    if (
+        isinstance(event, tuple)
+        and len(event) == 2
+        and event[0] in {"updates", "custom", "values"}
+    ):
+        return event[0], event[1]
+    return None, event
+
+
 async def chat_with_parent_graph(
     *,
     graph: Any,
@@ -126,6 +142,7 @@ async def chat_with_parent_graph(
         graph,
         state,
         thread_id,
+        db_session=db,
     )
     response = _response_from_state(thread_id, result)
     await upsert_session_message_pair(
@@ -159,7 +176,17 @@ async def stream_chat_with_parent_graph(
         state,
         thread_id,
         stream_mode=payload.stream_mode,
+        db_session=db,
     ):
+        event_mode, event_payload = _split_stream_event(event)
+        if event_mode == "custom":
+            if isinstance(event_payload, dict) and event_payload.get("type") == "answer_delta":
+                yield "delta", {"delta": event_payload.get("delta", "")}
+            else:
+                yield "custom", {"raw": event_payload}
+            continue
+        event = event_payload
+
         if payload.stream_mode == "values" and isinstance(event, dict):
             final_state = dict(event)
             yield "state", _public_state(final_state)

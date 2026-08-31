@@ -12,6 +12,7 @@ from __future__ import annotations
 import logging
 
 from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_core.runnables import RunnableConfig
 from openai import LengthFinishReasonError, OpenAIError
 
 from app.ai.scenes.script_rag import build_script_rag_graph
@@ -48,8 +49,10 @@ def carpool_handler(state: ParentGraphState) -> ParentGraphState:
     )
 
 
-async def script_rag_handler(state: ParentGraphState) -> ParentGraphState:
-    result = await script_rag_graph.ainvoke(state)
+async def script_rag_handler(
+    state: ParentGraphState, config: RunnableConfig | None = None
+) -> ParentGraphState:
+    result = await script_rag_graph.ainvoke(state, config=config)
     scene_payload = {
         "questionType": result.get("question_type"),
         "scriptId": result.get("script_id"),
@@ -60,6 +63,9 @@ async def script_rag_handler(state: ParentGraphState) -> ParentGraphState:
         "spoilerRisk": result.get("spoiler_risk"),
         "filters": result.get("allowed_filters", {}),
         "retrievedCount": len(result.get("retrieved_chunks", [])),
+        "contextRewrittenQuery": result.get("context_rewritten_query"),
+        "answerValidated": result.get("answer_validated"),
+        "answerValidation": result.get("answer_validation", {}),
     }
     return {
         **state,

@@ -33,8 +33,12 @@ class ScriptRagState(ParentGraphState, total=False):
     permission_level: ScriptPermissionLevel
     spoiler_risk: SpoilerRisk
     allowed_filters: dict[str, object]
+    context_rewritten_query: str
+    context_rewrite_reason: str
     retrieved_chunks: list[dict[str, object]]
     safe_context: str
+    answer_validation: dict[str, object]
+    answer_validated: bool
 
 
 class ScriptQuestionParseResult(TypedDict):

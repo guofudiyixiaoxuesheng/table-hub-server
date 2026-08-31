@@ -15,6 +15,23 @@ from app.integrations.llm.client import structured_chat_completion
 
 logger = logging.getLogger(__name__)
 
+MAX_RECENT_MESSAGES = 8
+
+
+def _recent_dialogue_text(state: ScriptRagState) -> str:
+    """提取最近几轮对话，用于补全“他/她/这个本/刚才那个”等指代。"""
+
+    messages = state.get("messages") or []
+    recent_messages = messages[-MAX_RECENT_MESSAGES:]
+    lines: list[str] = []
+    for item in recent_messages:
+        role = item.get("role", "user")
+        content = (item.get("content") or "").strip()
+        if not content:
+            continue
+        lines.append(f"{role}: {content}")
+    return "\n".join(lines)
+
 
 def _rule_parse(message: str) -> ScriptQuestionAnalysis:
     question_type = "public_consulting"
@@ -36,6 +53,7 @@ def _rule_parse(message: str) -> ScriptQuestionAnalysis:
     return ScriptQuestionAnalysis(
         question_type=question_type,  # type: ignore[arg-type]
         spoiler_risk=spoiler_risk,  # type: ignore[arg-type]
+        context_rewritten_query=message,
         confidence=0.55,
         reason="规则兜底解析",
     )
@@ -43,12 +61,13 @@ def _rule_parse(message: str) -> ScriptQuestionAnalysis:
 
 async def parse_script_question(state: ScriptRagState) -> ScriptRagState:
     message = state.get("message", "")
+    dialogue = _recent_dialogue_text(state)
     try:
         result = await structured_chat_completion(
             ScriptQuestionAnalysis,
             [
                 SystemMessage(content=SCRIPT_QUESTION_PARSE_PROMPT),
-                HumanMessage(content=f"用户问题：{message}"),
+                HumanMessage(content=f"最近对话：\n{dialogue or '无'}\n\n当前用户问题：{message}"),
             ],
             temperature=0,
             max_tokens=512,
@@ -64,6 +83,8 @@ async def parse_script_question(state: ScriptRagState) -> ScriptRagState:
         "act": result.act,
         "role_name": result.role_name,
         "spoiler_risk": result.spoiler_risk,
+        "context_rewritten_query": result.context_rewritten_query.strip() or message,
+        "context_rewrite_reason": result.reason,
         "script_question_confidence": result.confidence,
         "script_question_reason": result.reason,
     }
