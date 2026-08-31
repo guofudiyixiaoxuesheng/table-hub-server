@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import json
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, Query, Request
+from fastapi.responses import StreamingResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -21,6 +23,7 @@ from app.modules.chat.service import (
     delete_chat_session,
     get_chat_messages,
     list_chat_sessions,
+    stream_chat_with_parent_graph,
 )
 
 router = APIRouter(prefix="/chat", tags=["chat"])
@@ -41,6 +44,10 @@ def optional_access(credentials: OptionalBearerCredentials) -> StoreAccessContex
         return None
 
 
+def _sse(event: str, data: object) -> str:
+    return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False, default=str)}\n\n"
+
+
 @router.post("")
 async def chat(
     request: Request,
@@ -55,6 +62,36 @@ async def chat(
         access=access,
     )
     return success_response(data=data.model_dump(mode="json", by_alias=True))
+
+
+@router.post("/stream")
+async def chat_stream(
+    request: Request,
+    payload: ChatRequest,
+    db: Database,
+    access: Annotated[StoreAccessContext | None, Depends(optional_access)],
+) -> StreamingResponse:
+    async def event_stream():
+        try:
+            async for event, data in stream_chat_with_parent_graph(
+                graph=request.app.state.parent_graph,
+                payload=payload,
+                db=db,
+                access=access,
+            ):
+                yield _sse(event, data)
+        except Exception as exc:
+            await db.rollback()
+            yield _sse("error", {"message": str(exc)})
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 @router.get("/sessions")

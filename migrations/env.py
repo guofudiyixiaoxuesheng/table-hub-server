@@ -16,6 +16,7 @@ from app.modules.auth.models import (  # noqa: F401
     StoreMember,
 )
 from app.modules.chat.models import ChatMessage, ChatSession  # noqa: F401
+from app.modules.idempotency.models import IdempotencyRecord  # noqa: F401
 from app.modules.knowledge.models import KnowledgeDocument  # noqa: F401
 from app.modules.user.models import User  # noqa: F401
 

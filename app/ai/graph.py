@@ -8,14 +8,22 @@
 
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
+from typing import Any, Literal
+
 from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.graph import END, START, StateGraph
 
 from app.ai.nodes.classify import classify_scene
-from app.ai.nodes.generate import generate_answer
-from app.ai.nodes.rerank import rerank_context
-from app.ai.nodes.retrieve import retrieve_context
+from app.ai.nodes.handlers import (
+    carpool_handler,
+    fallback_handler,
+    reservation_handler,
+    script_rag_handler,
+    store_faq_handler,
+)
 from app.ai.nodes.rewrite import rewrite_query
+from app.ai.nodes.routes import route_scene
 from app.ai.state import ParentGraphState
 
 
@@ -23,21 +31,51 @@ def build_parent_graph(checkpointer: BaseCheckpointSaver | None = None):
     graph = StateGraph(ParentGraphState)
     graph.add_node("classify_scene", classify_scene)
     graph.add_node("rewrite_query", rewrite_query)
-    graph.add_node("retrieve_context", retrieve_context)
-    graph.add_node("rerank_context", rerank_context)
-    graph.add_node("generate_answer", generate_answer)
+    graph.add_node("carpool_handler", carpool_handler)
+    graph.add_node("script_rag_handler", script_rag_handler)
+    graph.add_node("reservation_handler", reservation_handler)
+    graph.add_node("store_faq_handler", store_faq_handler)
+    graph.add_node("fallback_handler", fallback_handler)
 
     graph.add_edge(START, "classify_scene")
     graph.add_edge("classify_scene", "rewrite_query")
-    graph.add_edge("rewrite_query", "retrieve_context")
-    graph.add_edge("retrieve_context", "rerank_context")
-    graph.add_edge("rerank_context", "generate_answer")
-    graph.add_edge("generate_answer", END)
+    graph.add_conditional_edges(
+        "rewrite_query",
+        route_scene,
+        {
+            "carpool": "carpool_handler",
+            "script_rag": "script_rag_handler",
+            "reservation": "reservation_handler",
+            "store_faq": "store_faq_handler",
+            "fallback": "fallback_handler",
+        },
+    )
+    graph.add_edge("carpool_handler", END)
+    graph.add_edge("script_rag_handler", END)
+    graph.add_edge("reservation_handler", END)
+    graph.add_edge("store_faq_handler", END)
+    graph.add_edge("fallback_handler", END)
     return graph.compile(checkpointer=checkpointer)
 
 
-async def run_parent_graph(graph, state: ParentGraphState, thread_id: str) -> ParentGraphState:
+async def run_parent_graph(
+    graph, state: ParentGraphState, thread_id: str
+) -> ParentGraphState:
     return await graph.ainvoke(
         state,
         config={"configurable": {"thread_id": thread_id}},
     )
+
+
+async def stream_parent_graph(
+    graph,
+    state: ParentGraphState,
+    thread_id: str,
+    stream_mode: Literal["updates", "values"] = "updates",
+) -> AsyncIterator[Any]:
+    async for event in graph.astream(
+        state,
+        config={"configurable": {"thread_id": thread_id}},
+        stream_mode=stream_mode,
+    ):
+        yield event

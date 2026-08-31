@@ -7,6 +7,8 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
+ChatStreamMode = Literal["updates", "values"]
+
 
 class ChatMessage(BaseModel):
     role: Literal["user", "assistant", "system", "tool"]
@@ -19,7 +21,7 @@ class ChatRequest(BaseModel):
     thread_id: str | None = Field(default=None, alias="threadId", max_length=120)
     guest_id: str | None = Field(default=None, alias="guestId", max_length=120)
     message: str = Field(min_length=1, max_length=4000)
-    messages: list[ChatMessage] = Field(default_factory=list, max_length=20)
+    stream_mode: ChatStreamMode = Field(default="updates", alias="streamMode")
 
 
 class ChatResponse(BaseModel):
@@ -27,6 +29,11 @@ class ChatResponse(BaseModel):
 
     thread_id: str = Field(alias="threadId")
     scene: str
+    intent: str = ""
+    intent_confidence: float = Field(default=0, alias="intentConfidence")
+    intent_reason: str = Field(default="", alias="intentReason")
+    raw_scene: str = Field(default="", alias="rawScene")
+    raw_intent: str = Field(default="", alias="rawIntent")
     answer: str
     next_action: str = Field(alias="nextAction")
     citations: list[dict[str, object]] = Field(default_factory=list)

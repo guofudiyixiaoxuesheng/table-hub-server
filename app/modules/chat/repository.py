@@ -84,6 +84,48 @@ async def get_session_with_messages(
     )
 
 
+async def ensure_visible_session(
+    *,
+    thread_id: str,
+    user_id: uuid.UUID | None,
+    store_id: uuid.UUID | None,
+    guest_id: str | None,
+    first_message: str,
+    db: AsyncSession,
+) -> ChatSession:
+    session = await get_visible_session(
+        thread_id=thread_id, user_id=user_id, guest_id=guest_id, db=db
+    )
+    if session is not None:
+        return session
+
+    session = ChatSession(
+        thread_id=thread_id,
+        user_id=user_id,
+        store_id=store_id,
+        guest_id=None if user_id else guest_id,
+        title=build_session_title(first_message),
+    )
+    db.add(session)
+    await db.flush()
+    return session
+
+
+async def list_recent_messages(
+    *,
+    session_id: uuid.UUID,
+    db: AsyncSession,
+    limit: int = 20,
+) -> list[ChatMessage]:
+    rows = await db.scalars(
+        select(ChatMessage)
+        .where(ChatMessage.session_id == session_id)
+        .order_by(ChatMessage.created_at.desc())
+        .limit(limit)
+    )
+    return list(reversed(list(rows)))
+
+
 async def upsert_session_message_pair(
     *,
     thread_id: str,
@@ -95,23 +137,16 @@ async def upsert_session_message_pair(
     scene: str,
     db: AsyncSession,
 ) -> ChatSession:
-    session = await get_visible_session(
-        thread_id=thread_id, user_id=user_id, guest_id=guest_id, db=db
+    session = await ensure_visible_session(
+        thread_id=thread_id,
+        user_id=user_id,
+        store_id=store_id,
+        guest_id=guest_id,
+        first_message=user_message,
+        db=db,
     )
-    if session is None:
-        session = ChatSession(
-            thread_id=thread_id,
-            user_id=user_id,
-            store_id=store_id,
-            guest_id=None if user_id else guest_id,
-            title=build_session_title(user_message),
-            scene=scene,
-        )
-        db.add(session)
-        await db.flush()
-    else:
-        session.scene = scene
-        session.updated_at = datetime.now(UTC)
+    session.scene = scene
+    session.updated_at = datetime.now(UTC)
 
     db.add_all(
         [

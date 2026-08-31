@@ -8,7 +8,13 @@ from __future__ import annotations
 
 from typing import Literal, TypedDict
 
-AiScene = Literal["dm_opening", "reservation", "customer_service", "fallback"]
+AiScene = Literal[
+    "carpool",
+    "script_rag",
+    "reservation",
+    "store_faq",
+    "fallback",
+]
 
 
 class AiMessage(TypedDict):
@@ -23,6 +29,11 @@ class ParentGraphState(TypedDict, total=False):
     message: str
     messages: list[AiMessage]
     scene: AiScene
+    intent: str
+    intent_confidence: float
+    intent_reason: str
+    raw_scene: str
+    raw_intent: str
     rewritten_query: str
     answer: str
     citations: list[dict[str, object]]
