@@ -17,6 +17,7 @@ from langgraph.graph import END, START, StateGraph
 from app.ai.nodes.classify import classify_scene
 from app.ai.nodes.handlers import (
     carpool_handler,
+    casual_chat_handler,
     fallback_handler,
     reservation_handler,
     script_rag_handler,
@@ -35,6 +36,7 @@ def build_parent_graph(checkpointer: BaseCheckpointSaver | None = None):
     graph.add_node("script_rag_handler", script_rag_handler)
     graph.add_node("reservation_handler", reservation_handler)
     graph.add_node("store_faq_handler", store_faq_handler)
+    graph.add_node("casual_chat_handler", casual_chat_handler)
     graph.add_node("fallback_handler", fallback_handler)
 
     graph.add_edge(START, "classify_scene")
@@ -47,6 +49,7 @@ def build_parent_graph(checkpointer: BaseCheckpointSaver | None = None):
             "script_rag": "script_rag_handler",
             "reservation": "reservation_handler",
             "store_faq": "store_faq_handler",
+            "casual_chat": "casual_chat_handler",
             "fallback": "fallback_handler",
         },
     )
@@ -54,6 +57,7 @@ def build_parent_graph(checkpointer: BaseCheckpointSaver | None = None):
     graph.add_edge("script_rag_handler", END)
     graph.add_edge("reservation_handler", END)
     graph.add_edge("store_faq_handler", END)
+    graph.add_edge("casual_chat_handler", END)
     graph.add_edge("fallback_handler", END)
     return graph.compile(checkpointer=checkpointer)
 

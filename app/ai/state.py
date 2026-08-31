@@ -13,6 +13,7 @@ AiScene = Literal[
     "script_rag",
     "reservation",
     "store_faq",
+    "casual_chat",
     "fallback",
 ]
 
@@ -38,3 +39,4 @@ class ParentGraphState(TypedDict, total=False):
     answer: str
     citations: list[dict[str, object]]
     next_action: str
+    scene_payload: dict[str, object]

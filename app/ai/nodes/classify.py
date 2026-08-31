@@ -52,6 +52,7 @@ VALID_SCENES: set[str] = {
     "script_rag",
     "reservation",
     "store_faq",
+    "casual_chat",
     "fallback",
 }
 INTENT_CONFIDENCE_THRESHOLD = 0.65
@@ -65,6 +66,7 @@ class IntentClassification(BaseModel):
         "script_rag",
         "reservation",
         "store_faq",
+        "casual_chat",
         "fallback",
     ] = Field(description="用户消息所属业务场景")
     intent: str = Field(default="", description="用一句短语概括用户真实意图")
@@ -94,7 +96,7 @@ def _rule_classify(message: str, role: str | None) -> tuple[AiScene, str, float,
     if any(word in message for word in RESERVATION_KEYWORDS):
         return "reservation", "reservation", 0.68, "命中预约关键词"
     if message.strip():
-        return "store_faq", "store_faq", 0.5, "有明确文本，默认门店客服"
+        return "casual_chat", "casual_chat", 0.55, "未命中业务关键词，进入引导闲聊"
     return "fallback", "fallback", 0.0, "空消息或无法识别"
 
 
@@ -112,6 +114,7 @@ async def _llm_classify(
                     "script_rag=所有剧本相关问题，包括剧本推荐、内容咨询、角色剧情、任务、线索、机制、复盘真相、DM 开本、带本和剧透控制；"
                     "reservation=预约、报名、价格、时间、余位；"
                     "store_faq=门店规则、地址、停车、退款等客服问题；"
+                    "casual_chat=闲聊、寒暄、无明确业务目标、业务相关度较低但可以友好回应并引导的问题；"
                     "fallback=无法识别。"
                     "JSON 必须包含 scene、intent、confidence、reason 四个字段。"
                 )
@@ -163,15 +166,15 @@ async def classify_scene(state: ParentGraphState) -> ParentGraphState:
         )
     raw_scene = scene
     raw_intent = intent
-    if scene != "fallback" and confidence < INTENT_CONFIDENCE_THRESHOLD:
-        scene = "fallback"
-        intent = "clarify_intent"
+    if scene not in {"fallback", "casual_chat"} and confidence < INTENT_CONFIDENCE_THRESHOLD:
+        scene = "casual_chat"
+        intent = "guide_to_business"
         reason = (
             f"意图置信度 {confidence:.2f} 低于阈值 "
-            f"{INTENT_CONFIDENCE_THRESHOLD:.2f}，需要用户补充信息。原判断：{raw_scene}。"
+            f"{INTENT_CONFIDENCE_THRESHOLD:.2f}，先进入引导闲聊。原判断：{raw_scene}。"
         )
         logger.info(
-            "意图置信度过低，转入兜底：raw_scene=%s confidence=%.2f threshold=%.2f",
+            "意图置信度过低，转入引导闲聊：raw_scene=%s confidence=%.2f threshold=%.2f",
             raw_scene,
             confidence,
             INTENT_CONFIDENCE_THRESHOLD,

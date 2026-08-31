@@ -11,6 +11,7 @@ RouteName = Literal[
     "script_rag",
     "reservation",
     "store_faq",
+    "casual_chat",
     "fallback",
 ]
 
@@ -24,6 +25,7 @@ def route_scene(state: ParentGraphState) -> RouteName:
         "script_rag",
         "reservation",
         "store_faq",
+        "casual_chat",
     }:
         return scene
     return "fallback"

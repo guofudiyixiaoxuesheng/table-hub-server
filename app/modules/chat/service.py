@@ -94,6 +94,7 @@ def _public_state(state: dict[str, Any]) -> dict[str, Any]:
         "intentReason": state.get("intent_reason"),
         "rawScene": state.get("raw_scene"),
         "rawIntent": state.get("raw_intent"),
+        "scenePayload": state.get("scene_payload", {}),
         "rewrittenQuery": state.get("rewritten_query"),
         "answer": state.get("answer"),
         "nextAction": state.get("next_action"),
