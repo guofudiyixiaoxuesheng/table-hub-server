@@ -31,7 +31,11 @@ def _fallback_validation(state: ScriptRagState) -> ScriptAnswerValidation:
         permission_safe=True,
         answer_relevant=has_answer,
         confidence=0.4,
-        issues=[] if has_context and has_answer else ["缺少上下文或回答内容，未执行完整 LLM 质检"],
+        issues=(
+            []
+            if has_context and has_answer
+            else ["缺少上下文或回答内容，未执行完整 LLM 质检"]
+        ),
         revised_answer=None,
     )
 
@@ -80,7 +84,9 @@ async def validate_script_answer(state: ScriptRagState) -> ScriptRagState:
             logger.warning("剧本 RAG 回答校验失败，使用保守兜底：%s", exc)
             validation = _fallback_validation(state)
 
-    final_answer = validation.revised_answer.strip() if validation.revised_answer else answer
+    final_answer = (
+        validation.revised_answer.strip() if validation.revised_answer else answer
+    )
     validation_payload = validation.model_dump(mode="json")
     debug_context("validate_script_answer:result", validation_payload)
     return {
@@ -88,7 +94,9 @@ async def validate_script_answer(state: ScriptRagState) -> ScriptRagState:
         "answer": final_answer,
         "answer_validation": validation_payload,
         "answer_validated": validation.passed,
-        "next_action": "剧本 RAG 回答已校验。"
-        if validation.passed
-        else "剧本 RAG 回答未完全通过校验，请查看 answer_validation。",
+        "next_action": (
+            "剧本 RAG 回答已校验。"
+            if validation.passed
+            else "剧本 RAG 回答未完全通过校验，请查看 answer_validation。"
+        ),
     }

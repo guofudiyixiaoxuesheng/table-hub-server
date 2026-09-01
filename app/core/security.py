@@ -6,12 +6,13 @@ from typing import Annotated
 
 import jwt
 from fastapi import Depends
-from fastapi.security import OAuth2PasswordBearer
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer, OAuth2PasswordBearer
 
 from app.core.config import settings
 from app.core.exceptions import ApplicationError
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/v1/auth/login")
+optional_bearer_scheme = HTTPBearer(auto_error=False)
 
 
 class AuthenticationError(ApplicationError):
@@ -69,6 +70,23 @@ def require_authenticated_user(
     except (jwt.PyJWTError, ValueError, KeyError, TypeError) as error:
         raise AuthenticationError("登录凭证无效或已过期") from error
     return context
+
+
+def get_optional_access(
+    credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(optional_bearer_scheme)],
+) -> StoreAccessContext | None:
+    """可选登录身份。
+
+    用在“游客可浏览、登录后字段更多”的接口上。没有 token 或 token 失效时返回 None，
+    不打断公开读取流程。
+    """
+
+    if credentials is None:
+        return None
+    try:
+        return require_authenticated_user(credentials.credentials)
+    except AuthenticationError:
+        return None
 
 
 def require_store_manager(
