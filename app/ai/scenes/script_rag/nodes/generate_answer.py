@@ -11,6 +11,7 @@ from openai import LengthFinishReasonError, OpenAIError
 from app.ai.scenes.script_rag.prompts import SCRIPT_RAG_ANSWER_PROMPT
 from app.ai.scenes.script_rag.state import ScriptRagState
 from app.ai.utils import debug_context, debug_state
+from app.core.config import settings
 from app.integrations.llm.client import (
     ChatModelNotConfiguredError,
     stream_chat_completion,
@@ -74,7 +75,7 @@ async def generate_script_answer(state: ScriptRagState) -> ScriptRagState:
                 HumanMessage(content=user_prompt),
             ],
             temperature=0.2,
-            max_tokens=1800,
+            max_tokens=settings.SCRIPT_RAG_ANSWER_MAX_TOKENS,
         ):
             parts.append(delta)
             writer({"type": "answer_delta", "delta": delta})

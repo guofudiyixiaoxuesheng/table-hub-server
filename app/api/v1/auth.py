@@ -15,6 +15,8 @@ from app.modules.auth.schemas import (
     ChangePasswordRequest,
     LoginRequest,
     RegisterRequest,
+    SmsCodeRequest,
+    SmsLoginRequest,
 )
 from app.modules.auth.service import (
     change_password,
@@ -23,6 +25,8 @@ from app.modules.auth.service import (
     logout,
     refresh,
     register,
+    send_sms_login_code,
+    sms_login_or_register,
 )
 
 router = APIRouter(prefix="/auth", tags=["auth"])
@@ -64,6 +68,27 @@ async def login_route(
     db: AsyncSession = Depends(get_database),  # noqa: B008
 ):
     result = await login(payload.phone, payload.password, db)
+    _set_refresh_cookie(response, result.refresh_token)
+    return success_response(
+        message="登录成功",
+        data=result.response.model_dump(mode="json", by_alias=True),
+    )
+
+
+@router.post("/sms/send-code")
+async def send_sms_login_code_route(payload: SmsCodeRequest):
+    debug_code = await send_sms_login_code(payload.phone)
+    data = {"debugCode": debug_code} if debug_code else None
+    return success_response(message="验证码已发送", data=data)
+
+
+@router.post("/sms/login")
+async def sms_login_route(
+    payload: SmsLoginRequest,
+    response: Response,
+    db: AsyncSession = Depends(get_database),  # noqa: B008
+):
+    result = await sms_login_or_register(payload.phone, payload.code, payload.nickname, db)
     _set_refresh_cookie(response, result.refresh_token)
     return success_response(
         message="登录成功",
@@ -168,5 +193,6 @@ async def me_route(
         storeId=membership.store_id if membership else None,
         storeName=membership.store.name if membership else None,
         role=membership.role if membership else user.role.value,
+        hasPassword=bool(user.password_hash),
     )
     return success_response(data=data.model_dump(mode="json", by_alias=True))

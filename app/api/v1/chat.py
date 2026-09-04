@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import uuid
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, Query, Request
@@ -33,6 +34,7 @@ OptionalBearerCredentials = Annotated[
 ]
 Database = Annotated[AsyncSession, Depends(get_database)]
 GuestIdQuery = Annotated[str | None, Query(alias="guestId", max_length=120)]
+StoreIdQuery = Annotated[uuid.UUID | None, Query(alias="storeId")]
 
 
 def optional_access(credentials: OptionalBearerCredentials) -> StoreAccessContext | None:
@@ -99,8 +101,9 @@ async def sessions(
     db: Database,
     access: Annotated[StoreAccessContext | None, Depends(optional_access)],
     guest_id: GuestIdQuery = None,
+    store_id: StoreIdQuery = None,
 ) -> dict[str, object]:
-    data = await list_chat_sessions(db=db, access=access, guest_id=guest_id)
+    data = await list_chat_sessions(db=db, access=access, guest_id=guest_id, store_id=store_id)
     return success_response(data=[item.model_dump(mode="json", by_alias=True) for item in data])
 
 
@@ -110,9 +113,10 @@ async def session_messages(
     db: Database,
     access: Annotated[StoreAccessContext | None, Depends(optional_access)],
     guest_id: GuestIdQuery = None,
+    store_id: StoreIdQuery = None,
 ) -> dict[str, object]:
     data = await get_chat_messages(
-        thread_id=thread_id, db=db, access=access, guest_id=guest_id
+        thread_id=thread_id, db=db, access=access, guest_id=guest_id, store_id=store_id
     )
     return success_response(data=data.model_dump(mode="json", by_alias=True))
 
@@ -123,8 +127,9 @@ async def delete_session(
     db: Database,
     access: Annotated[StoreAccessContext | None, Depends(optional_access)],
     guest_id: GuestIdQuery = None,
+    store_id: StoreIdQuery = None,
 ) -> dict[str, object]:
     await delete_chat_session(
-        thread_id=thread_id, db=db, access=access, guest_id=guest_id
+        thread_id=thread_id, db=db, access=access, guest_id=guest_id, store_id=store_id
     )
     return success_response(message="对话已删除")

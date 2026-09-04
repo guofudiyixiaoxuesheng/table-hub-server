@@ -77,6 +77,7 @@ class KnowledgeParsedFileStatus(str, enum.Enum):
     PENDING = "pending"
     PROCESSING = "processing"
     READY = "ready"
+    SKIPPED = "skipped"
     FAILED = "failed"
 
 
@@ -121,12 +122,45 @@ class KnowledgeResourceType(str, enum.Enum):
 
 class ScriptGenre(str, enum.Enum):
     MYSTERY_HARDCORE = "mystery_hardcore"
+    HONKAKU = "honkaku"
+    HENKAKU = "henkaku"
     RESTORATION = "restoration"
     EMOTIONAL = "emotional"
     MECHANISM = "mechanism"
     FACTION = "faction"
     COMEDY = "comedy"
     HORROR = "horror"
+
+
+class ScriptGenreOption(Base):
+    """门店可维护的剧本类型字典。
+
+    这里不再依赖 PostgreSQL enum 扩展剧本类型，避免每新增一个类型都要改 enum。
+    knowledge_documents.script_genre 存 value，展示时通过这张表拿中文 label。
+    """
+
+    __tablename__ = "script_genre_options"
+    __table_args__ = (
+        UniqueConstraint("store_id", "value", name="uq_script_genre_options_store_value"),
+        Index("ix_script_genre_options_store_active_sort", "store_id", "is_active", "sort_order"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    store_id: Mapped[uuid.UUID] = mapped_column(nullable=False, index=True)
+    value: Mapped[str] = mapped_column(String(80), nullable=False)
+    label: Mapped[str] = mapped_column(String(80), nullable=False)
+    description: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    sort_order: Mapped[int] = mapped_column(Integer, nullable=False, default=100, server_default="100")
+    is_active: Mapped[bool] = mapped_column(nullable=False, default=True, server_default="true")
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
 
 
 class KnowledgeDocument(Base):
@@ -147,14 +181,7 @@ class KnowledgeDocument(Base):
     )
     name: Mapped[str] = mapped_column(String(200), nullable=False)
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
-    script_genre: Mapped[ScriptGenre | None] = mapped_column(
-        Enum(
-            ScriptGenre,
-            name="script_genre",
-            values_callable=lambda items: [item.value for item in items],
-        ),
-        nullable=True,
-    )
+    script_genre: Mapped[str | None] = mapped_column(String(80), nullable=True)
     tags: Mapped[list[str]] = mapped_column(
         JSONB, nullable=False, default=list, server_default="[]"
     )

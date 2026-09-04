@@ -27,6 +27,7 @@ async def get_visible_session(
     *,
     thread_id: str,
     user_id: uuid.UUID | None,
+    store_id: uuid.UUID | None,
     guest_id: str | None,
     db: AsyncSession,
 ) -> ChatSession | None:
@@ -39,12 +40,14 @@ async def get_visible_session(
     else:
         filters.append(ChatSession.user_id.is_(None))
         filters.append(ChatSession.guest_id == guest_id)
+        filters.append(ChatSession.store_id == store_id)
     return await db.scalar(select(ChatSession).where(*filters))
 
 
 async def list_sessions(
     *,
     user_id: uuid.UUID | None,
+    store_id: uuid.UUID | None,
     guest_id: str | None,
     db: AsyncSession,
 ) -> list[ChatSession]:
@@ -54,6 +57,7 @@ async def list_sessions(
     else:
         filters.append(ChatSession.user_id.is_(None))
         filters.append(ChatSession.guest_id == guest_id)
+        filters.append(ChatSession.store_id == store_id)
     rows = await db.scalars(
         select(ChatSession)
         .where(*filters)
@@ -67,6 +71,7 @@ async def get_session_with_messages(
     *,
     thread_id: str,
     user_id: uuid.UUID | None,
+    store_id: uuid.UUID | None,
     guest_id: str | None,
     db: AsyncSession,
 ) -> ChatSession | None:
@@ -79,6 +84,7 @@ async def get_session_with_messages(
     else:
         filters.append(ChatSession.user_id.is_(None))
         filters.append(ChatSession.guest_id == guest_id)
+        filters.append(ChatSession.store_id == store_id)
     return await db.scalar(
         select(ChatSession).options(selectinload(ChatSession.messages)).where(*filters)
     )
@@ -94,7 +100,7 @@ async def ensure_visible_session(
     db: AsyncSession,
 ) -> ChatSession:
     session = await get_visible_session(
-        thread_id=thread_id, user_id=user_id, guest_id=guest_id, db=db
+        thread_id=thread_id, user_id=user_id, store_id=store_id, guest_id=guest_id, db=db
     )
     if session is not None:
         return session
@@ -173,11 +179,12 @@ async def soft_delete_session(
     *,
     thread_id: str,
     user_id: uuid.UUID | None,
+    store_id: uuid.UUID | None,
     guest_id: str | None,
     db: AsyncSession,
 ) -> bool:
     session = await get_visible_session(
-        thread_id=thread_id, user_id=user_id, guest_id=guest_id, db=db
+        thread_id=thread_id, user_id=user_id, store_id=store_id, guest_id=guest_id, db=db
     )
     if session is None:
         return False

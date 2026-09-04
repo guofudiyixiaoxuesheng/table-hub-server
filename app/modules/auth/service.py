@@ -33,6 +33,7 @@ from app.modules.auth.schemas import (
 from app.modules.user.models import User, UserRole, UserStatus
 
 password_hash = PasswordHash.recommended()
+_sms_codes: dict[str, tuple[str, datetime]] = {}
 
 
 @dataclass(frozen=True, slots=True)
@@ -52,12 +53,12 @@ def verify_password(password: str, encoded: str | None) -> bool:
 def _encode_token(payload: dict[str, object]) -> str:
     if len(settings.JWT_SECRET_KEY.encode()) < 32:
         raise AuthenticationConfigurationError("JWT_SECRET_KEY 必须至少为 32 字节")
-    return jwt.encode(payload, settings.JWT_SECRET_KEY, algorithm=settings.JWT_ALGORITHM)
+    return jwt.encode(
+        payload, settings.JWT_SECRET_KEY, algorithm=settings.JWT_ALGORITHM
+    )
 
 
-def _access_token(
-    user: User, membership: StoreMember | None, now: datetime
-) -> str:
+def _access_token(user: User, membership: StoreMember | None, now: datetime) -> str:
     expires_at = now + timedelta(minutes=settings.JWT_ACCESS_EXPIRES_MINUTES)
     return _encode_token(
         {
@@ -112,6 +113,7 @@ async def _issue_tokens(
             storeId=membership.store_id if membership else None,
             storeName=membership.store.name if membership else None,
             role=membership.role if membership else user.role.value,
+            hasPassword=bool(user.password_hash),
         ),
     )
     return AuthResult(response=response, refresh_token=refresh_value)
@@ -124,6 +126,65 @@ async def login(phone: str, password: str, db: AsyncSession) -> AuthResult:
     user, membership = identity
     user.last_login_at = datetime.now(UTC)
     return await _issue_tokens(user, membership, db)
+
+
+async def send_sms_login_code(phone: str) -> str | None:
+    """生成短信验证码。
+
+    当前是开发阶段实现：验证码临时存在进程内存，生产环境替换为阿里云/腾讯云短信发送即可。
+    返回值只用于 DEBUG 场景，方便本地联调；正式环境应返回 None。
+    """
+
+    code = f"{secrets.randbelow(1_000_000):06d}"
+    _sms_codes[phone] = (code, datetime.now(UTC) + timedelta(minutes=5))
+    return code if settings.DEBUG else None
+
+
+def _verify_sms_login_code(phone: str, code: str) -> None:
+    saved = _sms_codes.get(phone)
+    if saved is None:
+        raise AuthenticationError("验证码不存在或已过期")
+    saved_code, expires_at = saved
+    if expires_at <= datetime.now(UTC):
+        _sms_codes.pop(phone, None)
+        raise AuthenticationError("验证码已过期，请重新获取")
+    if not secrets.compare_digest(saved_code, code.strip()):
+        raise AuthenticationError("验证码错误")
+    _sms_codes.pop(phone, None)
+
+
+async def sms_login_or_register(
+    phone: str,
+    code: str,
+    nickname: str | None,
+    db: AsyncSession,
+) -> AuthResult:
+    """验证码快捷登录；手机号不存在时自动注册为普通玩家。"""
+
+    _verify_sms_login_code(phone, code)
+    identity = await get_login_identity(phone, db)
+    if identity is not None:
+        user, membership = identity
+        user.last_login_at = datetime.now(UTC)
+        user.phone_verified_at = user.phone_verified_at or datetime.now(UTC)
+        return await _issue_tokens(user, membership, db)
+
+    user = User(
+        phone=phone,
+        password_hash=None,
+        nickname=nickname or f"玩家{phone[-4:]}",
+        role=UserRole.USER,
+        status=UserStatus.ACTIVE,
+        phone_verified_at=datetime.now(UTC),
+        last_login_at=datetime.now(UTC),
+    )
+    db.add(user)
+    try:
+        await db.flush()
+    except IntegrityError as error:
+        await db.rollback()
+        raise ConflictError("该手机号已注册，请重新登录") from error
+    return await _issue_tokens(user, None, db)
 
 
 async def register(
@@ -166,7 +227,11 @@ async def register(
         status=UserStatus.ACTIVE,
         phone_verified_at=datetime.now(UTC),
     )
-    store = Store(name=store_name or "") if registration_type is RegistrationType.STORE else None
+    store = (
+        Store(name=store_name or "")
+        if registration_type is RegistrationType.STORE
+        else None
+    )
     db.add(user)
     if store:
         db.add(store)
@@ -213,15 +278,17 @@ async def create_dm_invite(
 async def change_password(
     user_id: uuid.UUID,
     store_id: uuid.UUID | None,
-    current_password: str,
+    current_password: str | None,
     new_password: str,
     db: AsyncSession,
 ) -> None:
     membership = await get_membership(user_id, store_id, db) if store_id else None
     user = membership.user if membership else await get_user(user_id, db)
-    if user is None or not verify_password(current_password, user.password_hash):
+    if user is None:
+        raise AuthenticationError("当前账户已失效")
+    if user.password_hash and not verify_password(current_password or "", user.password_hash):
         raise AuthenticationError("当前密码不正确")
-    if current_password == new_password:
+    if user.password_hash and current_password == new_password:
         raise ConflictError("新密码不能与当前密码相同")
     user.password_hash = hash_password(new_password)
     await revoke_user_refresh_tokens(user_id, datetime.now(UTC), db)

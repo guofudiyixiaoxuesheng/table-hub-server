@@ -48,3 +48,55 @@ class StorePlayerListResponse(BaseModel):
     total: int
     page: int
     page_size: int
+
+
+class PlayerSessionBehaviorItem(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    session_id: uuid.UUID
+    title: str
+    script_name: str
+    script_genre: str | None = None
+    start_time: datetime
+    duration_minutes: int
+    capacity: int
+    joined_seats: int
+    price_cents: int
+    cover_image_url: str | None = None
+    join_status: str
+    reservation_code: str
+    source: str
+    seat_count: int
+    joined_at: datetime
+    updated_at: datetime
+
+
+class PlayerBehaviorSummaryResponse(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    store_player: StorePlayerResponse
+    reservation_count: int
+    completed_count: int
+    cancelled_count: int
+    active_reservation_count: int
+    cancellation_rate: float
+    estimated_spend_cents: int
+    favorite_genres: list[str]
+    recent_sessions: list[PlayerSessionBehaviorItem]
+    ai_summary: str
+
+
+class StorePlayerAnalyticsResponse(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    total_players: int
+    reservation_count: int
+    completed_count: int
+    cancelled_count: int
+    active_reservation_count: int
+    cancellation_rate: float
+    estimated_revenue_cents: int
+    top_genres: list[dict[str, object]]
+    active_players: list[dict[str, object]]
+    risk_players: list[dict[str, object]]
+    ai_summary: str

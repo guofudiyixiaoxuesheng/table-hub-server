@@ -32,6 +32,7 @@ class Settings(BaseSettings):
         "http://127.0.0.1:3000,http://127.0.0.1:3001,"
         "http://192.168.1.116:3000"
     )
+    CORS_ORIGIN_REGEX: str | None = r"http://(localhost|127\.0\.0\.1|192\.168\.\d{1,3}\.\d{1,3}):300\d"
 
     @property
     def database_url(self) -> str:
@@ -58,6 +59,12 @@ class Settings(BaseSettings):
     QWEN_API_KEY: str | None = None
     QWEN_BASE_URL: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
     QWEN_MODEL: str = "qwen3.5-omni-plus"
+    QWEN_IMAGE_MODEL: str = "wanx2.1-t2i-turbo"
+    QWEN_IMAGE_SIZE: str = "1024*1024"
+    QWEN_IMAGE_API_URL: str = "https://dashscope.aliyuncs.com/api/v1/services/aigc/text2image/image-synthesis"
+    QWEN_IMAGE_TASK_URL: str = "https://dashscope.aliyuncs.com/api/v1/tasks"
+    QWEN_IMAGE_POLL_INTERVAL_SECONDS: float = 2.0
+    QWEN_IMAGE_POLL_TIMEOUT_SECONDS: float = 120.0
     EMBEDDING_MODEL: str = "text-embedding-v4"
     EMBEDDING_DIMENSION: int = 1024
     EMBEDDING_BATCH_SIZE: int = 10
@@ -82,6 +89,14 @@ class Settings(BaseSettings):
     EVALUATION_RETRY_MAX_TOKENS: int = 16384
     EVALUATION_METRICS: str = "faithfulness,answer_relevancy,context_utilization"
     EVALUATION_PASS_THRESHOLD: float = 0.7
+    SCRIPT_RAG_ANSWER_MAX_TOKENS: int = 6000
+
+    # Langfuse observability
+    LANGFUSE_ENABLED: bool = False
+    LANGFUSE_PUBLIC_KEY: str | None = None
+    LANGFUSE_SECRET_KEY: str | None = None
+    LANGFUSE_HOST: str | None = None
+    LANGFUSE_BASE_URL: str | None = None
 
     # Ollama
     ollama_base_url: str = "http://localhost:11434"

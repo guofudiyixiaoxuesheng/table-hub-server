@@ -18,6 +18,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.modules.knowledge.models import (
     KnowledgeDocument,
     KnowledgeDocumentStatus,
+    KnowledgeChunk,
+    KnowledgeChunkEmbedding,
+    KnowledgeEmbeddingStatus,
+    KnowledgeParsedFile,
+    KnowledgeParsedFileStatus,
     KnowledgeResourceType,
     KnowledgeVersion,
 )
@@ -74,7 +79,9 @@ def _apply_filters(statement, filters: KnowledgeDocumentSearchFilters):
 def _to_list_item(
     document: KnowledgeDocument,
     version: KnowledgeVersion | None,
+    ai_status: tuple[str, str, int] | None = None,
 ) -> KnowledgeDocumentListItem:
+    status, status_text, pipeline_percent = ai_status or ("not_ready", "未准备", 0)
     return KnowledgeDocumentListItem(
         id=document.id,
         resourceType=document.resource_type,
@@ -88,7 +95,74 @@ def _to_list_item(
         fileCount=version.file_count if version else 0,
         totalSize=version.total_size if version else 0,
         updatedAt=document.updated_at,
+        aiStatus=status,
+        aiStatusText=status_text,
+        pipelinePercent=pipeline_percent,
     )
+
+
+async def _build_ai_status_map(
+    version_ids: list[uuid.UUID],
+    db: AsyncSession,
+) -> dict[uuid.UUID, tuple[str, str, int]]:
+    if not version_ids:
+        return {}
+
+    parsed_rows = (
+        await db.execute(
+            select(
+                KnowledgeParsedFile.version_id,
+                func.count().label("total"),
+                func.count().filter(KnowledgeParsedFile.status == KnowledgeParsedFileStatus.READY).label("ready"),
+                func.count().filter(KnowledgeParsedFile.status == KnowledgeParsedFileStatus.FAILED).label("failed"),
+            )
+            .where(KnowledgeParsedFile.version_id.in_(version_ids))
+            .group_by(KnowledgeParsedFile.version_id)
+        )
+    ).all()
+    chunk_rows = (
+        await db.execute(
+            select(KnowledgeChunk.version_id, func.count().label("total"))
+            .where(KnowledgeChunk.version_id.in_(version_ids))
+            .group_by(KnowledgeChunk.version_id)
+        )
+    ).all()
+    embedding_rows = (
+        await db.execute(
+            select(
+                KnowledgeChunkEmbedding.version_id,
+                func.count().label("total"),
+                func.count().filter(KnowledgeChunkEmbedding.status == KnowledgeEmbeddingStatus.READY).label("ready"),
+                func.count().filter(KnowledgeChunkEmbedding.status == KnowledgeEmbeddingStatus.FAILED).label("failed"),
+            )
+            .where(KnowledgeChunkEmbedding.version_id.in_(version_ids))
+            .group_by(KnowledgeChunkEmbedding.version_id)
+        )
+    ).all()
+
+    parsed = {row.version_id: row for row in parsed_rows}
+    chunks = {row.version_id: row for row in chunk_rows}
+    embeddings = {row.version_id: row for row in embedding_rows}
+    result: dict[uuid.UUID, tuple[str, str, int]] = {}
+    for version_id in version_ids:
+        parsed_row = parsed.get(version_id)
+        chunk_row = chunks.get(version_id)
+        embedding_row = embeddings.get(version_id)
+        loaded_done = bool(parsed_row and parsed_row.total and parsed_row.ready == parsed_row.total)
+        chunk_done = bool(chunk_row and chunk_row.total)
+        embedding_done = bool(embedding_row and embedding_row.total and embedding_row.ready == embedding_row.total)
+        failed = bool((parsed_row and parsed_row.failed) or (embedding_row and embedding_row.failed))
+        completed = len([done for done in [loaded_done, chunk_done, embedding_done] if done])
+        percent = round(completed / 3 * 100)
+        if loaded_done and chunk_done and embedding_done:
+            result[version_id] = ("ready", "可使用", percent)
+        elif failed:
+            result[version_id] = ("partial_error", "部分异常", percent)
+        elif completed:
+            result[version_id] = ("processing", "整理中", percent)
+        else:
+            result[version_id] = ("not_ready", "未准备", percent)
+    return result
 
 
 async def search_knowledge_documents(
@@ -114,9 +188,11 @@ async def search_knowledge_documents(
     )
     statement = _apply_filters(statement, normalized_filters)
     rows = (await db.execute(statement)).tuples().all()
+    version_ids = [version.id for _, version in rows if version]
+    ai_status_map = await _build_ai_status_map(version_ids, db)
 
     return KnowledgeDocumentSearchResult(
-        items=[_to_list_item(document, version) for document, version in rows],
+        items=[_to_list_item(document, version, ai_status_map.get(version.id) if version else None) for document, version in rows],
         total=total or 0,
         page=page,
         pageSize=page_size,

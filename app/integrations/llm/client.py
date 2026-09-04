@@ -108,7 +108,11 @@ async def structured_chat_completion[StructuredOutputT: BaseModel](
 
     model = _get_chat_model(temperature=temperature, max_tokens=max_tokens)
     structured_model = model.with_structured_output(schema)
-    result = await structured_model.ainvoke([_to_base_message(item) for item in messages])
+    base_messages = [
+        SystemMessage(content="Return valid JSON that matches the requested schema."),
+        *[_to_base_message(item) for item in messages],
+    ]
+    result = await structured_model.ainvoke(base_messages)
     if isinstance(result, schema):
         return result
     return schema.model_validate(result)

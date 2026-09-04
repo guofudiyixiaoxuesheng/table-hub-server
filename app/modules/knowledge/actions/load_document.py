@@ -10,7 +10,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.integrations.mineru.client import MineruAsset, MineruClient
 from app.integrations.storage.oss import OssStorage
-from app.modules.knowledge.exceptions import KnowledgeDocumentNotFoundError
+from app.modules.knowledge.exceptions import (
+    KnowledgeDocumentNotFoundError,
+    KnowledgeDocumentUploadError,
+)
 from app.modules.knowledge.loaders import (
     LoadedMarkdown,
     detect_loader_type,
@@ -27,12 +30,15 @@ from app.modules.knowledge.repository import get_parsed_asset, get_version_for_m
 from app.modules.knowledge.schemas import (
     AssetPreviewUrlResponse,
     LoadKnowledgeDocumentResponse,
+    ManualParsedTextRequest,
     ParsedKnowledgeFileResponse,
     ParsedMarkdownResponse,
 )
 
 
-def _parsed_prefix(store_id: uuid.UUID, document_id: uuid.UUID, version_id: uuid.UUID) -> str:
+def _parsed_prefix(
+    store_id: uuid.UUID, document_id: uuid.UUID, version_id: uuid.UUID
+) -> str:
     return f"stores/{store_id}/knowledge/{document_id}/versions/{version_id}/parsed"
 
 
@@ -53,7 +59,25 @@ def _to_response(parsed: KnowledgeParsedFile) -> ParsedKnowledgeFileResponse:
     )
 
 
-def _asset_prefix(store_id: uuid.UUID, document_id: uuid.UUID, version_id: uuid.UUID) -> str:
+def _unloaded_file_response(file: KnowledgeFile) -> ParsedKnowledgeFileResponse:
+    return ParsedKnowledgeFileResponse(
+        id=None,
+        fileId=file.id,
+        relativePath=file.relative_path,
+        loaderType=detect_loader_type(file),
+        status="not_loaded",
+        markdownKey=None,
+        textSha256=None,
+        charCount=0,
+        assetCount=0,
+        errorMessage=None,
+        completedAt=None,
+    )
+
+
+def _asset_prefix(
+    store_id: uuid.UUID, document_id: uuid.UUID, version_id: uuid.UUID
+) -> str:
     return f"stores/{store_id}/knowledge/{document_id}/versions/{version_id}/assets"
 
 
@@ -161,6 +185,10 @@ async def _load_one_file(
         if parsed.assets:
             parsed.assets.clear()
         await db.flush()
+        if parsed.loader_type == "legacy_doc":
+            raise KnowledgeDocumentUploadError(
+                "旧版 Word（.doc）已跳过。请复制正文保存为 .txt/.md，或另存为 .docx/PDF 后通过“上传新版本”重新上传"
+            )
         if parsed.loader_type == "mineru_pdf":
             source_url = storage.presign_get(file.object_key)
             mineru_result = await MineruClient().parse_pdf_url(
@@ -185,7 +213,9 @@ async def _load_one_file(
             parsed.assets.append(asset)
             loaded = LoadedMarkdown(
                 loader_type="image_asset",
-                markdown=_image_markdown(PurePosixPath(file.relative_path).name, asset.id),
+                markdown=_image_markdown(
+                    PurePosixPath(file.relative_path).name, asset.id
+                ),
             )
         else:
             source = await storage.get_bytes(file.object_key)
@@ -197,6 +227,14 @@ async def _load_one_file(
         parsed.text_sha256 = hashlib.sha256(loaded.markdown.encode("utf-8")).hexdigest()
         parsed.char_count = len(loaded.markdown)
         parsed.status = KnowledgeParsedFileStatus.READY
+        parsed.completed_at = datetime.now(UTC)
+    except KnowledgeDocumentUploadError as error:
+        parsed.status = (
+            KnowledgeParsedFileStatus.SKIPPED
+            if parsed.loader_type == "legacy_doc"
+            else KnowledgeParsedFileStatus.FAILED
+        )
+        parsed.error_message = str(error)
         parsed.completed_at = datetime.now(UTC)
     except Exception as error:  # noqa: BLE001
         parsed.status = KnowledgeParsedFileStatus.FAILED
@@ -223,7 +261,10 @@ async def load_document_action(
 
     for file in version.files:
         parsed = existing.get(file.id)
-        if parsed and parsed.status is KnowledgeParsedFileStatus.READY:
+        if parsed and parsed.status in {
+            KnowledgeParsedFileStatus.READY,
+            KnowledgeParsedFileStatus.SKIPPED,
+        }:
             parsed_files.append(parsed)
             continue
 
@@ -278,6 +319,55 @@ async def load_single_file_action(
     return _to_response(parsed)
 
 
+async def save_manual_parsed_text_action(
+    document_id: uuid.UUID,
+    version_id: uuid.UUID,
+    file_id: uuid.UUID,
+    store_id: uuid.UUID,
+    payload: ManualParsedTextRequest,
+    db: AsyncSession,
+    storage: OssStorage | None = None,
+) -> ParsedKnowledgeFileResponse:
+    version = await get_version_for_manifest(document_id, version_id, store_id, db)
+    if version is None:
+        raise KnowledgeDocumentNotFoundError("知识库版本不存在")
+
+    file = next((item for item in version.files if item.id == file_id), None)
+    if file is None:
+        raise KnowledgeDocumentNotFoundError("知识库文件不存在")
+
+    existing = {parsed.file_id: parsed for parsed in version.parsed_files}
+    parsed = existing.get(file.id) or KnowledgeParsedFile(
+        id=uuid.uuid4(),
+        version_id=version_id,
+        file_id=file.id,
+        loader_type="manual_text",
+    )
+    parsed.file = file
+    if "assets" not in parsed.__dict__:
+        parsed.assets = []
+    if parsed.assets:
+        parsed.assets.clear()
+    text = payload.text.strip()
+    title = PurePosixPath(file.relative_path).name
+    markdown = f"# {title}\n\n> 该内容由门店人工补录，用于知识库 RAG 检索。\n\n{text}\n"
+    markdown_key = (
+        f"{_parsed_prefix(store_id, document_id, version_id)}/{file.id}/content.md"
+    )
+    await (storage or OssStorage()).put_text(markdown_key, markdown)
+
+    parsed.loader_type = "manual_text"
+    parsed.markdown_key = markdown_key
+    parsed.text_sha256 = hashlib.sha256(markdown.encode("utf-8")).hexdigest()
+    parsed.char_count = len(markdown)
+    parsed.status = KnowledgeParsedFileStatus.READY
+    parsed.error_message = None
+    parsed.completed_at = datetime.now(UTC)
+    db.add(parsed)
+    await db.flush()
+    return _to_response(parsed)
+
+
 async def list_loaded_files_action(
     document_id: uuid.UUID,
     version_id: uuid.UUID,
@@ -288,10 +378,59 @@ async def list_loaded_files_action(
     if version is None:
         raise KnowledgeDocumentNotFoundError("知识库版本不存在")
 
+    parsed_by_file = {parsed.file_id: parsed for parsed in version.parsed_files}
     return LoadKnowledgeDocumentResponse(
         documentId=document_id,
         versionId=version_id,
-        files=[_to_response(parsed) for parsed in version.parsed_files],
+        files=[
+            (
+                _to_response(parsed_by_file[file.id])
+                if file.id in parsed_by_file
+                else _unloaded_file_response(file)
+            )
+            for file in version.files
+        ],
+    )
+
+
+async def delete_knowledge_file_action(
+    document_id: uuid.UUID,
+    version_id: uuid.UUID,
+    file_id: uuid.UUID,
+    store_id: uuid.UUID,
+    db: AsyncSession,
+) -> LoadKnowledgeDocumentResponse:
+    version = await get_version_for_manifest(document_id, version_id, store_id, db)
+    if version is None:
+        raise KnowledgeDocumentNotFoundError("知识库版本不存在")
+
+    file = next((item for item in version.files if item.id == file_id), None)
+    if file is None:
+        raise KnowledgeDocumentNotFoundError("知识库文件不存在")
+
+    remaining_files = [item for item in version.files if item.id != file_id]
+    await db.delete(file)
+    await db.flush()
+    version.file_count = len(remaining_files)
+    version.total_size = sum(item.size for item in remaining_files)
+    await db.flush()
+
+    parsed_by_file = {
+        parsed.file_id: parsed
+        for parsed in version.parsed_files
+        if parsed.file_id != file_id
+    }
+    return LoadKnowledgeDocumentResponse(
+        documentId=document_id,
+        versionId=version_id,
+        files=[
+            (
+                _to_response(parsed_by_file[item.id])
+                if item.id in parsed_by_file
+                else _unloaded_file_response(item)
+            )
+            for item in remaining_files
+        ],
     )
 
 

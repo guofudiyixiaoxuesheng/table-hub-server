@@ -4,29 +4,38 @@ import uuid
 from datetime import date
 
 from fastapi import APIRouter, Depends, Query, status
-from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.common.responses import success_response
 from app.core.database import get_database
-from app.core.security import StoreAccessContext, StoreManagerAccess, get_optional_access
-from app.modules.auth.models import Store
+from app.core.security import CurrentAccess, StoreAccessContext, StoreManagerAccess, get_optional_access
+from app.core.store_context import resolve_request_store_id
 from app.modules.game_session.schemas import (
     CreateGameSessionRequest,
+    CreateRoomRequest,
     SessionPlayerRequest,
+    UpdateRoomRequest,
     UpdateGameSessionRequest,
     UpdateSessionPlayerRequest,
 )
 from app.modules.game_session.models import GameSessionStatus
 from app.modules.game_session.service import (
     add_session_player,
+    cancel_game_session,
+    cancel_my_session_join,
+    create_room,
     create_game_session,
+    delete_room,
     delete_game_session,
     delete_session_player,
     get_game_session_detail,
+    join_game_session,
     list_dm_options,
     list_game_sessions,
+    list_rooms,
+    list_script_image_assets,
     list_script_options,
+    update_room,
     update_game_session,
     update_session_player,
 )
@@ -39,11 +48,11 @@ async def _resolve_store_id(
     access: StoreAccessContext | None,
     store_id: uuid.UUID | None,
 ) -> uuid.UUID | None:
-    if access and access.store_id:
-        return access.store_id
-    if store_id:
-        return await db.scalar(select(Store.id).where(Store.id == store_id))
-    return await db.scalar(select(Store.id).order_by(Store.created_at.asc()).limit(1))
+    return await resolve_request_store_id(
+        db=db,
+        access=access,
+        requested_store_id=store_id,
+    )
 
 
 def _is_manager(access: StoreAccessContext | None) -> bool:
@@ -73,6 +82,57 @@ async def dm_options(
     return success_response(data=[item.model_dump(mode="json", by_alias=True) for item in await list_dm_options(access.store_id, db)])
 
 
+@router.get("/rooms")
+async def room_list_route(
+    access: StoreManagerAccess,
+    include_disabled: bool = Query(default=True, alias="includeDisabled"),
+    db: AsyncSession = Depends(get_database),
+):
+    data = await list_rooms(access.store_id, db, include_disabled=include_disabled)
+    return success_response(data=[item.model_dump(mode="json", by_alias=True) for item in data])
+
+
+@router.post("/rooms", status_code=status.HTTP_201_CREATED)
+async def create_room_route(
+    payload: CreateRoomRequest,
+    access: StoreManagerAccess,
+    db: AsyncSession = Depends(get_database),
+):
+    data = await create_room(access.store_id, payload, db)
+    return success_response(message="房间已创建", data=data.model_dump(mode="json", by_alias=True))
+
+
+@router.put("/rooms/{room_id}")
+async def update_room_route(
+    room_id: uuid.UUID,
+    payload: UpdateRoomRequest,
+    access: StoreManagerAccess,
+    db: AsyncSession = Depends(get_database),
+):
+    data = await update_room(access.store_id, room_id, payload, db)
+    return success_response(message="房间已更新", data=data.model_dump(mode="json", by_alias=True))
+
+
+@router.delete("/rooms/{room_id}")
+async def delete_room_route(
+    room_id: uuid.UUID,
+    access: StoreManagerAccess,
+    db: AsyncSession = Depends(get_database),
+):
+    await delete_room(access.store_id, room_id, db)
+    return success_response(message="房间已删除")
+
+
+@router.get("/script-image-options")
+async def script_image_options(
+    access: StoreManagerAccess,
+    script_document_id: uuid.UUID = Query(alias="scriptDocumentId"),
+    db: AsyncSession = Depends(get_database),
+):
+    data = await list_script_image_assets(access.store_id, script_document_id, db)
+    return success_response(data=[item.model_dump(mode="json", by_alias=True) for item in data])
+
+
 @router.get("")
 async def list_sessions(
     access: StoreAccessContext | None = Depends(get_optional_access),
@@ -80,6 +140,7 @@ async def list_sessions(
     day: date | None = Query(default=None, description="按某一天过滤，格式 YYYY-MM-DD"),
     status_filter: GameSessionStatus | None = Query(default=None, alias="status"),
     script_document_id: uuid.UUID | None = Query(default=None, alias="scriptDocumentId"),
+    room_id: uuid.UUID | None = Query(default=None, alias="roomId"),
     store_id: uuid.UUID | None = Query(default=None, alias="storeId"),
     db: AsyncSession = Depends(get_database),
 ):
@@ -93,6 +154,7 @@ async def list_sessions(
         day=day,
         status=status_filter if _is_manager(access) else (status_filter or GameSessionStatus.RECRUITING),
         script_document_id=script_document_id,
+        room_id=room_id,
     )
     return success_response(
         data=[
@@ -122,7 +184,12 @@ async def get_session_route(
     resolved_store_id = await _resolve_store_id(db, access, store_id)
     if not resolved_store_id:
         return success_response(data=None)
-    data = await get_game_session_detail(resolved_store_id, session_id, db)
+    data = await get_game_session_detail(
+        resolved_store_id,
+        session_id,
+        db,
+        current_user_id=access.user_id if access else None,
+    )
     payload = data.model_dump(mode="json", by_alias=True)
     if not _is_manager(access):
         payload.pop("notes", None)
@@ -149,6 +216,50 @@ async def delete_session_route(
 ):
     await delete_game_session(access.store_id, session_id, db)
     return success_response(message="场次已删除")
+
+
+@router.post("/{session_id}/cancel")
+async def cancel_session_route(
+    session_id: uuid.UUID,
+    access: StoreManagerAccess,
+    db: AsyncSession = Depends(get_database),
+):
+    data = await cancel_game_session(access.store_id, session_id, db)
+    return success_response(message="场次已取消", data=data.model_dump(mode="json", by_alias=True))
+
+
+@router.post("/{session_id}/join")
+async def join_session_route(
+    session_id: uuid.UUID,
+    access: CurrentAccess,
+    store_id: uuid.UUID | None = Query(default=None, alias="storeId"),
+    db: AsyncSession = Depends(get_database),
+):
+    resolved_store_id = await _resolve_store_id(db, access, store_id)
+    if not resolved_store_id:
+        return success_response(data=None)
+    data = await join_game_session(resolved_store_id, session_id, access.user_id, db)
+    payload = data.model_dump(mode="json", by_alias=True)
+    payload.pop("notes", None)
+    payload.pop("players", None)
+    return success_response(message="约车成功", data=payload)
+
+
+@router.post("/{session_id}/join/cancel")
+async def cancel_my_join_route(
+    session_id: uuid.UUID,
+    access: CurrentAccess,
+    store_id: uuid.UUID | None = Query(default=None, alias="storeId"),
+    db: AsyncSession = Depends(get_database),
+):
+    resolved_store_id = await _resolve_store_id(db, access, store_id)
+    if not resolved_store_id:
+        return success_response(data=None)
+    data = await cancel_my_session_join(resolved_store_id, session_id, access.user_id, db)
+    payload = data.model_dump(mode="json", by_alias=True)
+    payload.pop("notes", None)
+    payload.pop("players", None)
+    return success_response(message="约车已取消", data=payload)
 
 
 @router.post("/{session_id}/players", status_code=status.HTTP_201_CREATED)

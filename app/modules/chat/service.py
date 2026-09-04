@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.ai.graph import run_parent_graph, stream_parent_graph
 from app.ai.state import AiMessage
 from app.core.security import StoreAccessContext
+from app.core.store_context import resolve_request_store_id
 from app.modules.chat.exceptions import ChatSessionNotFoundError
 from app.modules.chat.repository import (
     ensure_visible_session,
@@ -27,16 +28,30 @@ from app.modules.chat.schemas import (
     ChatSessionMessages,
     ChatSessionSummary,
 )
+from app.modules.analytics.service import maybe_create_rag_evaluation_from_state
+from app.observability.langfuse import langfuse_callbacks
+from app.observability.tracing import trace_chat
 
 
 def _normalize_thread_id(value: str | None) -> str:
     return value.strip() if value and value.strip() else f"chat-{uuid.uuid4()}"
 
 
-def _owner(access: StoreAccessContext | None, guest_id: str | None) -> tuple[uuid.UUID | None, uuid.UUID | None, str | None]:
+async def _owner(
+    *,
+    db: AsyncSession,
+    access: StoreAccessContext | None,
+    guest_id: str | None,
+    requested_store_id: uuid.UUID | None = None,
+) -> tuple[uuid.UUID | None, uuid.UUID | None, str | None]:
     if access:
         return access.user_id, access.store_id, None
-    return None, None, guest_id
+    store_id = await resolve_request_store_id(
+        db=db,
+        access=access,
+        requested_store_id=requested_store_id,
+    )
+    return None, store_id, guest_id
 
 
 async def _build_graph_state(
@@ -46,7 +61,12 @@ async def _build_graph_state(
     access: StoreAccessContext | None,
 ) -> tuple[str, uuid.UUID | None, uuid.UUID | None, str | None, dict[str, Any]]:
     thread_id = _normalize_thread_id(payload.thread_id)
-    user_id, store_id, guest_id = _owner(access, payload.guest_id)
+    user_id, store_id, guest_id = await _owner(
+        db=db,
+        access=access,
+        guest_id=payload.guest_id,
+        requested_store_id=payload.store_id,
+    )
     session = await ensure_visible_session(
         thread_id=thread_id,
         user_id=user_id,
@@ -116,8 +136,26 @@ def _split_stream_event(event: Any) -> tuple[str | None, Any]:
 
     stream_mode=["updates", "custom"] 时，LangGraph 会返回：
     ("updates", {...}) 或 ("custom", {...})。
+
+    subgraphs=True 后，子图事件可能带 namespace：
+    (("script_rag_handler:xxx",), "custom", {...})
+    或 (("script_rag_handler:xxx",), ("custom", {...}))。
     """
 
+    if (
+        isinstance(event, tuple)
+        and len(event) == 3
+        and event[1] in {"updates", "custom", "values"}
+    ):
+        return event[1], event[2]
+    if (
+        isinstance(event, tuple)
+        and len(event) == 2
+        and isinstance(event[1], tuple)
+        and len(event[1]) == 2
+        and event[1][0] in {"updates", "custom", "values"}
+    ):
+        return event[1][0], event[1][1]
     if (
         isinstance(event, tuple)
         and len(event) == 2
@@ -138,14 +176,30 @@ async def chat_with_parent_graph(
         payload=payload, db=db, access=access
     )
 
-    result = await run_parent_graph(
-        graph,
-        state,
-        thread_id,
-        db_session=db,
-    )
+    metadata = {
+        "store_id": str(store_id) if store_id else None,
+        "user_id": str(user_id) if user_id else None,
+        "guest_id": guest_id,
+        "stream": False,
+    }
+    with trace_chat(
+        trace_name="tablehub-ai-chat",
+        user_id=str(user_id) if user_id else None,
+        session_id=thread_id,
+        store_id=str(store_id) if store_id else None,
+        guest_id=guest_id,
+        metadata=metadata,
+    ):
+        result = await run_parent_graph(
+            graph,
+            state,
+            thread_id,
+            callbacks=langfuse_callbacks(),
+            metadata=metadata,
+            db_session=db,
+        )
     response = _response_from_state(thread_id, result)
-    await upsert_session_message_pair(
+    chat_session = await upsert_session_message_pair(
         thread_id=thread_id,
         user_id=user_id,
         store_id=store_id,
@@ -153,6 +207,16 @@ async def chat_with_parent_graph(
         user_message=payload.message,
         assistant_message=response.answer,
         scene=response.scene,
+        db=db,
+    )
+    await maybe_create_rag_evaluation_from_state(
+        thread_id=thread_id,
+        store_id=store_id,
+        user_id=user_id,
+        guest_id=guest_id,
+        chat_session=chat_session,
+        question=payload.message,
+        state=result,
         db=db,
     )
     return response
@@ -171,32 +235,49 @@ async def stream_chat_with_parent_graph(
     final_state = dict(state)
     yield "session", {"threadId": thread_id, "streamMode": payload.stream_mode}
 
-    async for event in stream_parent_graph(
-        graph,
-        state,
-        thread_id,
-        stream_mode=payload.stream_mode,
-        db_session=db,
+    metadata = {
+        "store_id": str(store_id) if store_id else None,
+        "user_id": str(user_id) if user_id else None,
+        "guest_id": guest_id,
+        "stream": True,
+        "stream_mode": payload.stream_mode,
+    }
+    with trace_chat(
+        trace_name="tablehub-ai-chat-stream",
+        user_id=str(user_id) if user_id else None,
+        session_id=thread_id,
+        store_id=str(store_id) if store_id else None,
+        guest_id=guest_id,
+        metadata=metadata,
     ):
-        event_mode, event_payload = _split_stream_event(event)
-        if event_mode == "custom":
-            if isinstance(event_payload, dict) and event_payload.get("type") == "answer_delta":
-                yield "delta", {"delta": event_payload.get("delta", "")}
-            else:
-                yield "custom", {"raw": event_payload}
-            continue
-        event = event_payload
+        async for event in stream_parent_graph(
+            graph,
+            state,
+            thread_id,
+            stream_mode=payload.stream_mode,
+            callbacks=langfuse_callbacks(),
+            metadata=metadata,
+            db_session=db,
+        ):
+            event_mode, event_payload = _split_stream_event(event)
+            if event_mode == "custom":
+                if isinstance(event_payload, dict) and event_payload.get("type") == "answer_delta":
+                    yield "delta", {"delta": event_payload.get("delta", "")}
+                else:
+                    yield "custom", {"raw": event_payload}
+                continue
+            event = event_payload
 
-        if payload.stream_mode == "values" and isinstance(event, dict):
-            final_state = dict(event)
-            yield "state", _public_state(final_state)
-            continue
+            if payload.stream_mode == "values" and isinstance(event, dict):
+                final_state = dict(event)
+                yield "state", _public_state(final_state)
+                continue
 
-        final_state = _merge_update_event(final_state, event)
-        yield "update", {"raw": event, "state": _public_state(final_state)}
+            final_state = _merge_update_event(final_state, event)
+            yield "update", {"raw": event, "state": _public_state(final_state)}
 
     response = _response_from_state(thread_id, final_state)
-    await upsert_session_message_pair(
+    chat_session = await upsert_session_message_pair(
         thread_id=thread_id,
         user_id=user_id,
         store_id=store_id,
@@ -204,6 +285,16 @@ async def stream_chat_with_parent_graph(
         user_message=payload.message,
         assistant_message=response.answer,
         scene=response.scene,
+        db=db,
+    )
+    await maybe_create_rag_evaluation_from_state(
+        thread_id=thread_id,
+        store_id=store_id,
+        user_id=user_id,
+        guest_id=guest_id,
+        chat_session=chat_session,
+        question=payload.message,
+        state=final_state,
         db=db,
     )
     yield "answer", response.model_dump(mode="json", by_alias=True)
@@ -215,9 +306,15 @@ async def list_chat_sessions(
     db: AsyncSession,
     access: StoreAccessContext | None = None,
     guest_id: str | None = None,
+    store_id: uuid.UUID | None = None,
 ) -> list[ChatSessionSummary]:
-    user_id, _, owner_guest_id = _owner(access, guest_id)
-    sessions = await list_sessions(user_id=user_id, guest_id=owner_guest_id, db=db)
+    user_id, owner_store_id, owner_guest_id = await _owner(
+        db=db,
+        access=access,
+        guest_id=guest_id,
+        requested_store_id=store_id,
+    )
+    sessions = await list_sessions(user_id=user_id, store_id=owner_store_id, guest_id=owner_guest_id, db=db)
     return [
         ChatSessionSummary(
             id=str(item.id),
@@ -237,10 +334,16 @@ async def get_chat_messages(
     db: AsyncSession,
     access: StoreAccessContext | None = None,
     guest_id: str | None = None,
+    store_id: uuid.UUID | None = None,
 ) -> ChatSessionMessages:
-    user_id, _, owner_guest_id = _owner(access, guest_id)
+    user_id, owner_store_id, owner_guest_id = await _owner(
+        db=db,
+        access=access,
+        guest_id=guest_id,
+        requested_store_id=store_id,
+    )
     session = await get_session_with_messages(
-        thread_id=thread_id, user_id=user_id, guest_id=owner_guest_id, db=db
+        thread_id=thread_id, user_id=user_id, store_id=owner_store_id, guest_id=owner_guest_id, db=db
     )
     if session is None:
         raise ChatSessionNotFoundError("对话不存在或已删除")
@@ -267,10 +370,16 @@ async def delete_chat_session(
     db: AsyncSession,
     access: StoreAccessContext | None = None,
     guest_id: str | None = None,
+    store_id: uuid.UUID | None = None,
 ) -> None:
-    user_id, _, owner_guest_id = _owner(access, guest_id)
+    user_id, owner_store_id, owner_guest_id = await _owner(
+        db=db,
+        access=access,
+        guest_id=guest_id,
+        requested_store_id=store_id,
+    )
     deleted = await soft_delete_session(
-        thread_id=thread_id, user_id=user_id, guest_id=owner_guest_id, db=db
+        thread_id=thread_id, user_id=user_id, store_id=owner_store_id, guest_id=owner_guest_id, db=db
     )
     if not deleted:
         raise ChatSessionNotFoundError("对话不存在或已删除")

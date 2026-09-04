@@ -11,6 +11,7 @@ from app.api.v1.knowledge.routes.initiate_upload import router as initiate_route
 from app.api.v1.knowledge.routes.list_documents import router as list_router
 from app.api.v1.knowledge.routes.load_document import router as load_router
 from app.api.v1.knowledge.routes.retrieve_chunks import router as retrieve_router
+from app.api.v1.knowledge.routes.script_genres import router as script_genres_router
 
 router = APIRouter(prefix="/knowledge", tags=["knowledge"])
 router.include_router(initiate_router)
@@ -22,3 +23,4 @@ router.include_router(load_router)
 router.include_router(chunk_router)
 router.include_router(embed_router)
 router.include_router(retrieve_router)
+router.include_router(script_genres_router)

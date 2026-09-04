@@ -63,11 +63,22 @@ def build_parent_graph(checkpointer: BaseCheckpointSaver | None = None):
 
 
 async def run_parent_graph(
-    graph, state: ParentGraphState, thread_id: str, **configurable: Any
+    graph,
+    state: ParentGraphState,
+    thread_id: str,
+    callbacks: list[Any] | None = None,
+    metadata: dict[str, Any] | None = None,
+    run_name: str | None = None,
+    **configurable: Any,
 ) -> ParentGraphState:
     return await graph.ainvoke(
         state,
-        config={"configurable": {"thread_id": thread_id, **configurable}},
+        config={
+            "configurable": {"thread_id": thread_id, **configurable},
+            "callbacks": callbacks or [],
+            "metadata": metadata or {},
+            "run_name": run_name or "tablehub-parent-graph",
+        },
     )
 
 
@@ -76,6 +87,9 @@ async def stream_parent_graph(
     state: ParentGraphState,
     thread_id: str,
     stream_mode: Literal["updates", "values"] = "updates",
+    callbacks: list[Any] | None = None,
+    metadata: dict[str, Any] | None = None,
+    run_name: str | None = None,
     **configurable: Any,
 ) -> AsyncIterator[Any]:
     graph_stream_mode: Any = (
@@ -83,7 +97,13 @@ async def stream_parent_graph(
     )
     async for event in graph.astream(
         state,
-        config={"configurable": {"thread_id": thread_id, **configurable}},
+        config={
+            "configurable": {"thread_id": thread_id, **configurable},
+            "callbacks": callbacks or [],
+            "metadata": metadata or {},
+            "run_name": run_name or "tablehub-parent-graph-stream",
+        },
         stream_mode=graph_stream_mode,
+        subgraphs=True,
     ):
         yield event

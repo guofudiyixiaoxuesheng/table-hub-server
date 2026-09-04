@@ -13,11 +13,13 @@ from app.modules.knowledge.actions.embed_chunks import (
 from app.modules.knowledge.actions.get_manifest import get_manifest_action
 from app.modules.knowledge.actions.initiate_upload import initiate_upload_action
 from app.modules.knowledge.actions.load_document import (
+    delete_knowledge_file_action,
     get_asset_preview_url_action,
     get_loaded_markdown_action,
     list_loaded_files_action,
     load_document_action,
     load_single_file_action,
+    save_manual_parsed_text_action,
 )
 from app.modules.knowledge.actions.retrieve_chunks import KnowledgeRetriever
 
@@ -26,6 +28,7 @@ __all__ = [
     "chunk_document_action",
     "complete_upload_action",
     "delete_document_action",
+    "delete_knowledge_file_action",
     "embed_chunks_action",
     "get_asset_preview_url_action",
     "get_loaded_markdown_action",
@@ -36,4 +39,5 @@ __all__ = [
     "list_loaded_files_action",
     "load_document_action",
     "load_single_file_action",
+    "save_manual_parsed_text_action",
 ]

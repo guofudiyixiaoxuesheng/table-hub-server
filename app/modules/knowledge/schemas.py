@@ -6,7 +6,7 @@ from datetime import datetime
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.core.config import settings
-from app.modules.knowledge.models import KnowledgeResourceType, ScriptGenre
+from app.modules.knowledge.models import KnowledgeResourceType
 
 
 class KnowledgeFileRequest(BaseModel):
@@ -28,7 +28,7 @@ class InitiateKnowledgeDocumentUploadRequest(BaseModel):
     name: str = Field(alias="name", min_length=1, max_length=200)
     version: str = Field(min_length=1, max_length=80)
     description: str | None = Field(default=None, max_length=2000)
-    script_genre: ScriptGenre | None = Field(default=None, alias="scriptGenre")
+    script_genre: str | None = Field(default=None, alias="scriptGenre", max_length=80)
     tags: list[str] = Field(default_factory=list, max_length=30)
     files: list[KnowledgeFileRequest] = Field(min_length=1)
 
@@ -95,7 +95,7 @@ class KnowledgeDocumentManifestResponse(BaseModel):
     version_id: uuid.UUID = Field(alias="versionId")
     store_id: uuid.UUID = Field(alias="storeId")
     resource_type: KnowledgeResourceType = Field(alias="resourceType")
-    script_genre: ScriptGenre | None = Field(default=None, alias="scriptGenre")
+    script_genre: str | None = Field(default=None, alias="scriptGenre", max_length=80)
     name: str = Field(alias="name")
     version: str
     description: str | None
@@ -107,7 +107,7 @@ class KnowledgeDocumentManifestResponse(BaseModel):
 class ParsedKnowledgeFileResponse(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
-    id: uuid.UUID
+    id: uuid.UUID | None = None
     file_id: uuid.UUID = Field(alias="fileId")
     relative_path: str = Field(alias="relativePath")
     loader_type: str = Field(alias="loaderType")
@@ -118,6 +118,10 @@ class ParsedKnowledgeFileResponse(BaseModel):
     asset_count: int = Field(alias="assetCount")
     error_message: str | None = Field(default=None, alias="errorMessage")
     completed_at: datetime | None = Field(default=None, alias="completedAt")
+
+
+class ManualParsedTextRequest(BaseModel):
+    text: str = Field(min_length=1, max_length=500_000)
 
 
 class LoadKnowledgeDocumentResponse(BaseModel):
@@ -248,7 +252,7 @@ class KnowledgeDocumentListItem(BaseModel):
 
     id: uuid.UUID
     resource_type: KnowledgeResourceType = Field(alias="resourceType")
-    script_genre: ScriptGenre | None = Field(default=None, alias="scriptGenre")
+    script_genre: str | None = Field(default=None, alias="scriptGenre", max_length=80)
     name: str
     description: str | None
     tags: list[str]
@@ -258,6 +262,9 @@ class KnowledgeDocumentListItem(BaseModel):
     file_count: int = Field(alias="fileCount")
     total_size: int = Field(alias="totalSize")
     updated_at: datetime = Field(alias="updatedAt")
+    ai_status: str = Field(default="not_ready", alias="aiStatus")
+    ai_status_text: str = Field(default="未准备", alias="aiStatusText")
+    pipeline_percent: int = Field(default=0, alias="pipelinePercent")
 
 
 class KnowledgeDocumentSearchResult(BaseModel):
@@ -267,3 +274,35 @@ class KnowledgeDocumentSearchResult(BaseModel):
     total: int
     page: int
     page_size: int = Field(alias="pageSize")
+
+
+class ScriptGenreOptionCreateRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    value: str = Field(min_length=1, max_length=80, pattern=r"^[a-z0-9_]+$")
+    label: str = Field(min_length=1, max_length=80)
+    description: str | None = Field(default=None, max_length=500)
+    sort_order: int = Field(default=100, alias="sortOrder", ge=0, le=9999)
+    is_active: bool = Field(default=True, alias="isActive")
+
+
+class ScriptGenreOptionUpdateRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    label: str | None = Field(default=None, min_length=1, max_length=80)
+    description: str | None = Field(default=None, max_length=500)
+    sort_order: int | None = Field(default=None, alias="sortOrder", ge=0, le=9999)
+    is_active: bool | None = Field(default=None, alias="isActive")
+
+
+class ScriptGenreOptionResponse(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    id: uuid.UUID
+    value: str
+    label: str
+    description: str | None
+    sort_order: int = Field(alias="sortOrder")
+    is_active: bool = Field(alias="isActive")
+    created_at: datetime = Field(alias="createdAt")
+    updated_at: datetime = Field(alias="updatedAt")

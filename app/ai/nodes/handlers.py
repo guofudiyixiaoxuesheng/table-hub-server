@@ -13,11 +13,12 @@ import logging
 
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_core.runnables import RunnableConfig
+from langgraph.config import get_stream_writer
 from openai import LengthFinishReasonError, OpenAIError
 
 from app.ai.scenes.script_rag import build_script_rag_graph
 from app.ai.state import AiMessage, ParentGraphState
-from app.integrations.llm.client import ChatModelNotConfiguredError, chat_completion
+from app.integrations.llm.client import ChatModelNotConfiguredError, stream_chat_completion
 
 logger = logging.getLogger(__name__)
 
@@ -109,27 +110,47 @@ def _casual_chat_fallback(state: ParentGraphState) -> ParentGraphState:
     return {**state, "answer": answer, "next_action": "引导用户进入拼车、剧本 RAG、预约或门店咨询。"}
 
 
+def _write_answer_delta(delta: str) -> None:
+    """向 LangGraph custom stream 写出回答增量。
+
+    非流式 ainvoke 场景下没有 stream writer，这里直接忽略，保证普通接口也能复用节点。
+    """
+
+    try:
+        writer = get_stream_writer()
+        writer({"type": "answer_delta", "delta": delta})
+    except RuntimeError:
+        return
+
+
 async def casual_chat_handler(state: ParentGraphState) -> ParentGraphState:
     """业务相关度低时的自然闲聊，不急着导购。"""
 
     try:
-        answer = await chat_completion(
-            [
-                SystemMessage(
-                    content=(
-                        "你是 TableHub 的轻量 AI 客服，也是一个自然、温和的聊天助手。"
-                        "当前用户没有明确业务诉求时，先自然回应，不要急着推销、不要立刻列业务清单。"
-                        "如果用户是在寒暄、自我介绍、表达情绪，就顺着回应，并结合上下文记住信息。"
-                        "只有当用户主动提到拼车、剧本、预约、门店规则、DM 开本时，才轻轻引导到对应能力。"
-                        "回复要短，1到3句话，中文口语化。"
-                    )
-                ),
-                *_recent_chat_messages(state),
-                HumanMessage(content=state.get("message", "")),
-            ],
+        messages = [
+            SystemMessage(
+                content=(
+                    "你是 TableHub 的轻量 AI 客服，也是一个自然、温和的聊天助手。"
+                    "当前用户没有明确业务诉求时，先自然回应，不要急着推销、不要立刻列业务清单。"
+                    "如果用户是在寒暄、自我介绍、表达情绪，就顺着回应，并结合上下文记住信息。"
+                    "只有当用户主动提到拼车、剧本、预约、门店规则、DM 开本时，才轻轻引导到对应能力。"
+                    "回复要短，1到3句话，中文口语化。"
+                )
+            ),
+            *_recent_chat_messages(state),
+            HumanMessage(content=state.get("message", "")),
+        ]
+        parts: list[str] = []
+        async for delta in stream_chat_completion(
+            messages,
             temperature=0.6,
             max_tokens=300,
-        )
+        ):
+            parts.append(delta)
+            _write_answer_delta(delta)
+        answer = "".join(parts)
+        if not answer.strip():
+            return _casual_chat_fallback(state)
         return {
             **state,
             "answer": answer,

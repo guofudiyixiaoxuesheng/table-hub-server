@@ -43,7 +43,11 @@ def _retrieval_payload(state: ScriptRagState, query: str) -> KnowledgeRetrieveRe
         query=query,
         topK=8,
         mode="hybrid",
-        roleName=role_name if permission_level in {"player", "dm", "manager", "admin"} else None,
+        roleName=(
+            role_name
+            if permission_level in {"player", "dm", "manager", "admin"}
+            else None
+        ),
         act=act,
     )
 
@@ -116,7 +120,12 @@ async def retrieve_script_context(
     """
     debug_state("retrieve_script_context:input", state)
 
-    query = state.get("context_rewritten_query") or state.get("rewritten_query") or state.get("message") or ""
+    query = (
+        state.get("context_rewritten_query")
+        or state.get("rewritten_query")
+        or state.get("message")
+        or ""
+    )
     store_id = _parse_uuid(state.get("store_id"))
     db = _get_configurable(config).get("db_session")
     debug_context(

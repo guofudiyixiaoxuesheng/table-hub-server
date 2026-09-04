@@ -25,6 +25,25 @@ class LoginRequest(BaseModel):
         return normalized
 
 
+class SmsCodeRequest(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
+
+    phone: str = Field(max_length=20)
+
+    @field_validator("phone")
+    @classmethod
+    def normalize_phone(cls, value: str) -> str:
+        normalized = re.sub(r"[\s()-]", "", value)
+        if not PHONE_PATTERN.fullmatch(normalized):
+            raise ValueError("手机号格式不正确")
+        return normalized
+
+
+class SmsLoginRequest(SmsCodeRequest):
+    code: str = Field(min_length=4, max_length=8)
+    nickname: str | None = Field(default=None, max_length=50)
+
+
 class RegistrationType(str, Enum):
     USER = "user"
     STORE = "store"
@@ -49,7 +68,7 @@ class RegisterRequest(LoginRequest):
 class ChangePasswordRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    current_password: str = Field(alias="currentPassword", min_length=8, max_length=128)
+    current_password: str | None = Field(default=None, alias="currentPassword", min_length=8, max_length=128)
     new_password: str = Field(alias="newPassword", min_length=8, max_length=128)
 
 
@@ -63,6 +82,7 @@ class AuthUserResponse(BaseModel):
     store_id: uuid.UUID | None = Field(alias="storeId")
     store_name: str | None = Field(alias="storeName")
     role: str
+    has_password: bool = Field(alias="hasPassword")
 
 
 class TokenResponse(BaseModel):

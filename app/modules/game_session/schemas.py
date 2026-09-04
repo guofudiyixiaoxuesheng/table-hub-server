@@ -8,6 +8,7 @@ from datetime import datetime
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.modules.game_session.models import (
+    GameSessionImageSource,
     GameSessionStatus,
     SessionJoinSource,
     SessionPlayerStatus,
@@ -31,11 +32,49 @@ class DmOptionResponse(BaseModel):
     phone: str | None
 
 
+class SessionImageAssetResponse(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    id: uuid.UUID
+    label: str
+    preview_url: str = Field(alias="previewUrl")
+    relative_path: str | None = Field(default=None, alias="relativePath")
+    page_number: int | None = Field(default=None, alias="pageNumber")
+
+
+class RoomBase(BaseModel):
+    model_config = ConfigDict(populate_by_name=True, str_strip_whitespace=True)
+
+    name: str = Field(min_length=1, max_length=80)
+    capacity: int = Field(default=6, ge=1, le=50)
+    location: str | None = Field(default=None, max_length=120)
+    status: str = Field(default="active", pattern=r"^(active|disabled)$")
+    notes: str | None = Field(default=None, max_length=1000)
+
+
+class CreateRoomRequest(RoomBase):
+    pass
+
+
+class UpdateRoomRequest(RoomBase):
+    pass
+
+
+class RoomResponse(RoomBase):
+    model_config = ConfigDict(from_attributes=True, populate_by_name=True)
+
+    id: uuid.UUID
+    store_id: uuid.UUID = Field(alias="storeId")
+    created_at: datetime = Field(alias="createdAt")
+    updated_at: datetime = Field(alias="updatedAt")
+
+
 class GameSessionBase(BaseModel):
     model_config = ConfigDict(populate_by_name=True, str_strip_whitespace=True)
 
     script_document_id: uuid.UUID | None = Field(default=None, alias="scriptDocumentId")
     dm_user_id: uuid.UUID | None = Field(default=None, alias="dmUserId")
+    room_id: uuid.UUID | None = Field(default=None, alias="roomId")
     title: str = Field(min_length=1, max_length=160)
     script_name: str = Field(alias="scriptName", min_length=1, max_length=200)
     start_time: datetime = Field(alias="startTime")
@@ -45,6 +84,12 @@ class GameSessionBase(BaseModel):
     price_cents: int = Field(default=0, alias="priceCents", ge=0)
     description: str | None = Field(default=None, max_length=2000)
     notes: str | None = Field(default=None, max_length=2000)
+    cover_image_source: GameSessionImageSource | None = Field(default=None, alias="coverImageSource")
+    cover_image_asset_id: uuid.UUID | None = Field(default=None, alias="coverImageAssetId")
+    cover_image_url: str | None = Field(default=None, alias="coverImageUrl", max_length=2048)
+    detail_image_source: GameSessionImageSource | None = Field(default=None, alias="detailImageSource")
+    detail_image_asset_ids: list[uuid.UUID] = Field(default_factory=list, alias="detailImageAssetIds", max_length=20)
+    detail_image_urls: list[str] = Field(default_factory=list, alias="detailImageUrls", max_length=20)
 
     @model_validator(mode="after")
     def validate_capacity(self):
@@ -101,6 +146,8 @@ class GameSessionResponse(BaseModel):
     store_id: uuid.UUID = Field(alias="storeId")
     script_document_id: uuid.UUID | None = Field(alias="scriptDocumentId")
     dm_user_id: uuid.UUID | None = Field(alias="dmUserId")
+    room_id: uuid.UUID | None = Field(default=None, alias="roomId")
+    room_name: str | None = Field(default=None, alias="roomName")
     title: str
     script_name: str = Field(alias="scriptName")
     start_time: datetime = Field(alias="startTime")
@@ -114,6 +161,15 @@ class GameSessionResponse(BaseModel):
     joined_seats: int = Field(alias="joinedSeats")
     player_count: int = Field(alias="playerCount")
     dm_name: str | None = Field(default=None, alias="dmName")
+    my_reservation_id: uuid.UUID | None = Field(default=None, alias="myReservationId")
+    my_reservation_status: SessionPlayerStatus | None = Field(default=None, alias="myReservationStatus")
+    my_reservation_code: str | None = Field(default=None, alias="myReservationCode")
+    cover_image_source: GameSessionImageSource | None = Field(default=None, alias="coverImageSource")
+    cover_image_asset_id: uuid.UUID | None = Field(default=None, alias="coverImageAssetId")
+    cover_image_url: str | None = Field(default=None, alias="coverImageUrl")
+    detail_image_source: GameSessionImageSource | None = Field(default=None, alias="detailImageSource")
+    detail_image_asset_ids: list[uuid.UUID] = Field(default_factory=list, alias="detailImageAssetIds")
+    detail_image_urls: list[str] = Field(default_factory=list, alias="detailImageUrls")
     created_at: datetime = Field(alias="createdAt")
     updated_at: datetime = Field(alias="updatedAt")
 

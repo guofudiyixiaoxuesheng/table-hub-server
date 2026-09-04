@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import uuid
 from datetime import datetime
 from typing import Literal
 
@@ -20,6 +21,7 @@ class ChatRequest(BaseModel):
 
     thread_id: str | None = Field(default=None, alias="threadId", max_length=120)
     guest_id: str | None = Field(default=None, alias="guestId", max_length=120)
+    store_id: uuid.UUID | None = Field(default=None, alias="storeId")
     message: str = Field(min_length=1, max_length=4000)
     stream_mode: ChatStreamMode = Field(default="updates", alias="streamMode")
 

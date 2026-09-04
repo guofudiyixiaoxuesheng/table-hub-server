@@ -4,13 +4,12 @@ import uuid
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, Query
-from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.common.responses import success_response
 from app.core.database import get_database
 from app.core.security import StoreAccessContext, get_optional_access
-from app.modules.auth.models import Store
+from app.core.store_context import resolve_request_store_id
 from app.modules.knowledge.actions.search_documents import (
     KnowledgeDocumentSearchFilters,
     search_knowledge_documents,
@@ -36,11 +35,11 @@ async def get_knowledge_documents(
     store_id: Annotated[uuid.UUID | None, Query(alias="storeId")] = None,
     db: AsyncSession = Depends(get_database),  # noqa: B008
 ):
-    resolved_store_id = access.store_id if access and access.store_id else None
-    if resolved_store_id is None and store_id:
-        resolved_store_id = await db.scalar(select(Store.id).where(Store.id == store_id))
-    if resolved_store_id is None:
-        resolved_store_id = await db.scalar(select(Store.id).order_by(Store.created_at.asc()).limit(1))
+    resolved_store_id = await resolve_request_store_id(
+        db=db,
+        access=access,
+        requested_store_id=store_id,
+    )
     if resolved_store_id is None:
         return success_response(data=[], meta={"total": 0, "page": page, "pageSize": page_size})
 
