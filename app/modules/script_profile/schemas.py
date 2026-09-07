@@ -11,7 +11,9 @@ from pydantic import BaseModel, ConfigDict, Field
 class ScriptProfileGenerateRequest(BaseModel):
     """生成/重新生成剧本档案的入参。"""
 
-    extra_requirement: str | None = Field(default=None, alias="extraRequirement", max_length=1000)
+    extra_requirement: str | None = Field(
+        default=None, alias="extraRequirement", max_length=1000
+    )
 
     model_config = ConfigDict(populate_by_name=True, validate_by_name=True)
 
@@ -34,7 +36,10 @@ class ScriptProfileUpdateRequest(BaseModel):
     suitable_players: list[str] | None = Field(default=None, alias="suitablePlayers")
     core_mechanics: list[str] | None = Field(default=None, alias="coreMechanics")
     roles: list[dict[str, object]] | None = None
-    material_checklist: list[str] | None = Field(default=None, alias="materialChecklist")
+    relationships: list[dict[str, object]] | None = None
+    material_checklist: list[str] | None = Field(
+        default=None, alias="materialChecklist"
+    )
     opening_risks: list[str] | None = Field(default=None, alias="openingRisks")
     spoiler_notes: list[str] | None = Field(default=None, alias="spoilerNotes")
 
@@ -87,11 +92,13 @@ class ScriptProfileResult(BaseModel):
     suitable_players: list[str] = Field(alias="suitablePlayers")
     core_mechanics: list[str] = Field(alias="coreMechanics")
     roles: list[dict[str, object]]
+    relationships: list[dict[str, object]]
     material_checklist: list[str] = Field(alias="materialChecklist")
     opening_risks: list[str] = Field(alias="openingRisks")
     spoiler_notes: list[str] = Field(alias="spoilerNotes")
     source_chunk_ids: list[str] = Field(alias="sourceChunkIds")
     sources: list[str]
+    retrieval_diagnostics: list[dict[str, object]] = Field(alias="retrievalDiagnostics")
     confidence_score: int | None = Field(alias="confidenceScore")
     review_status: str = Field(alias="reviewStatus")
     error_message: str | None = Field(alias="errorMessage")
@@ -100,3 +107,36 @@ class ScriptProfileResult(BaseModel):
     updated_at: datetime = Field(alias="updatedAt")
 
     model_config = ConfigDict(populate_by_name=True)
+
+
+class ScriptRelationship(BaseModel):
+    """剧本人物关系边。"""
+
+    from_name: str = Field(alias="from")
+    to: str
+    relation: str
+    sub_type: str | None = Field(default=None, alias="subType")
+    emotion_tone: list[str] = Field(default_factory=list, alias="emotionTone")
+    relationship_arc: str | None = Field(default=None, alias="relationshipArc")
+    player_experience: str | None = Field(default=None, alias="playerExperience")
+    dm_notes: str | None = Field(default=None, alias="dmNotes")
+    spoiler_level: str | None = Field(default=None, alias="spoilerLevel")
+    confidence: int = Field(default=60, ge=0, le=100)
+    is_official_pair: bool = Field(default=False, alias="isOfficialPair")
+    importance: int = Field(default=60, ge=0, le=100)
+    display_priority: int = Field(default=999, alias="displayPriority", ge=1)
+    evidence_strength: int = Field(default=60, alias="evidenceStrength", ge=0, le=100)
+    source: str | None = None
+
+    model_config = ConfigDict(populate_by_name=True, validate_by_name=True)
+
+
+class ScriptRelationshipsResult(BaseModel):
+    """LLM 单独抽取的人物关系结果。"""
+
+    relationships: list[ScriptRelationship] = Field(default_factory=list)
+    needs_review_reasons: list[str] = Field(
+        default_factory=list, alias="needsReviewReasons"
+    )
+
+    model_config = ConfigDict(populate_by_name=True, validate_by_name=True)

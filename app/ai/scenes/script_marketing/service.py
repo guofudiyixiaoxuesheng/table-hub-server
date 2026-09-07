@@ -13,7 +13,17 @@ from pydantic import BaseModel, Field, ValidationError
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.ai.scenes.script_marketing.models import ScriptMarketingAsset, ScriptMarketingAssetStatus, ScriptMarketingImageStatus
+from app.ai.scenes.script_marketing.models import (
+    ScriptMarketingAsset,
+    ScriptMarketingAssetStatus,
+    ScriptMarketingImageStatus,
+)
+from app.ai.scenes.script_marketing.prompts import (
+    MARKETING_SYSTEM_PROMPT,
+    build_marketing_retrieval_query,
+    build_marketing_user_prompt,
+    format_script_profile_for_marketing,
+)
 from app.ai.scenes.script_marketing.schemas import (
     ScriptMarketingApproveRequest,
     ScriptMarketingAssetResult,
@@ -29,6 +39,7 @@ from app.modules.knowledge.actions.retrieve_chunks import KnowledgeRetriever
 from app.modules.knowledge.exceptions import KnowledgeDocumentNotFoundError
 from app.modules.knowledge.models import KnowledgeDocument, KnowledgeResourceType
 from app.modules.knowledge.schemas import KnowledgeRetrieveRequest
+from app.modules.script_profile.models import ScriptProfile
 
 
 class _MarketingDraft(BaseModel):
@@ -40,6 +51,10 @@ class _MarketingDraft(BaseModel):
     cover_prompt: str = Field(description="主图生成提示词，不剧透")
     detail_copy: str = Field(description="详情页文案，可直接展示给玩家")
     detail_image_prompts: list[str] = Field(description="2-4 张详情图生成提示词")
+    session_form_defaults: dict[str, object] = Field(
+        default_factory=dict,
+        description="创建场次表单默认值，字段包含 title, description, durationMinutes, capacity, minPlayers, priceYuan, notes",
+    )
     risk_notes: list[str] = Field(description="剧透/版权/误导风险提醒")
 
 
@@ -48,27 +63,13 @@ class ScriptMarketingGenerationError(ApplicationError):
     code = "script_marketing_generation_failed"
 
 
-def _purpose_label(purpose: str) -> str:
-    return {
-        "script_profile": "剧本资料页宣传",
-        "session_fill": "创建/编辑场次自动填充",
-        "cover_and_detail": "主图与详情图提示词",
-    }.get(purpose, purpose)
-
-
-def _build_query(document: KnowledgeDocument, payload: ScriptMarketingGenerateRequest) -> str:
-    return (
-        f"为剧本《{document.name}》生成{_purpose_label(payload.purpose)}需要的资料。"
-        "重点提取：剧本类型、故事背景、玩家可见卖点、适合人群、氛围、时长人数线索、"
-        "视觉元素、禁止剧透的信息。"
-    )
-
-
 def _format_context(chunks: list[object]) -> tuple[str, list[str]]:
     lines: list[str] = []
     sources: list[str] = []
     for index, chunk in enumerate(chunks, start=1):
-        relative_path = getattr(chunk, "relative_path", None) or getattr(chunk, "relativePath", "")
+        relative_path = getattr(chunk, "relative_path", None) or getattr(
+            chunk, "relativePath", ""
+        )
         title = getattr(chunk, "title", None) or "未命名片段"
         content = getattr(chunk, "content", "")
         lines.append(f"[{index}] 来源：{relative_path} / {title}\n{content}")
@@ -81,7 +82,9 @@ def _safe_list(value: object, fallback: list[str]) -> list[str]:
     if isinstance(value, list):
         return [str(item).strip() for item in value if str(item).strip()]
     if isinstance(value, str) and value.strip():
-        return [item.strip() for item in value.replace("，", ",").split(",") if item.strip()]
+        return [
+            item.strip() for item in value.replace("，", ",").split(",") if item.strip()
+        ]
     return fallback
 
 
@@ -97,20 +100,49 @@ def _extract_json_object(raw: str) -> dict[str, object]:
         text = text[start : end + 1]
     payload = json.loads(text)
     if not isinstance(payload, dict):
-        raise ValueError("模型没有返回 JSON 对象")
+        raise TypeError("模型没有返回 JSON 对象")
     return payload
 
 
-def _draft_from_mapping(data: dict[str, object], document: KnowledgeDocument) -> _MarketingDraft:
+def _draft_from_mapping(
+    data: dict[str, object], document: KnowledgeDocument
+) -> _MarketingDraft:
     title = str(data.get("title") or f"《{document.name}》沉浸式拼车局").strip()
-    summary = str(data.get("summary") or document.description or f"基于《{document.name}》资料生成的玩家可见简介。").strip()
-    selling_points = _safe_list(data.get("selling_points") or data.get("sellingPoints"), ["沉浸体验", "适合拼车", "门店精选"])
-    suitable_players = _safe_list(data.get("suitable_players") or data.get("suitablePlayers"), ["想体验新剧本的玩家"])
+    summary = str(
+        data.get("summary")
+        or document.description
+        or f"基于《{document.name}》资料生成的玩家可见简介。"
+    ).strip()
+    selling_points = _safe_list(
+        data.get("selling_points") or data.get("sellingPoints"),
+        ["沉浸体验", "适合拼车", "门店精选"],
+    )
+    suitable_players = _safe_list(
+        data.get("suitable_players") or data.get("suitablePlayers"),
+        ["想体验新剧本的玩家"],
+    )
     tags = _safe_list(data.get("tags"), list(document.tags or [])[:4] or ["剧本杀"])
-    cover_prompt = str(data.get("cover_prompt") or data.get("coverPrompt") or f"为剧本《{document.name}》生成一张不剧透的宣传主图，突出氛围、场景和类型感。").strip()
-    detail_copy = str(data.get("detail_copy") or data.get("detailCopy") or summary).strip()
-    detail_image_prompts = _safe_list(data.get("detail_image_prompts") or data.get("detailImagePrompts"), [cover_prompt])
-    risk_notes = _safe_list(data.get("risk_notes") or data.get("riskNotes"), ["发布前请人工确认不包含凶手、隐藏身份、最终反转等剧透信息"])
+    cover_prompt = str(
+        data.get("cover_prompt")
+        or data.get("coverPrompt")
+        or f"为剧本《{document.name}》生成一张不剧透的宣传主图，突出氛围、场景和类型感。"
+    ).strip()
+    detail_copy = str(
+        data.get("detail_copy") or data.get("detailCopy") or summary
+    ).strip()
+    detail_image_prompts = _safe_list(
+        data.get("detail_image_prompts") or data.get("detailImagePrompts"),
+        [cover_prompt],
+    )
+    risk_notes = _safe_list(
+        data.get("risk_notes") or data.get("riskNotes"),
+        ["发布前请人工确认不包含凶手、隐藏身份、最终反转等剧透信息"],
+    )
+    session_form_defaults = (
+        data.get("session_form_defaults") or data.get("sessionFormDefaults") or {}
+    )
+    if not isinstance(session_form_defaults, dict):
+        session_form_defaults = {}
     return _MarketingDraft(
         title=title,
         summary=summary,
@@ -120,6 +152,7 @@ def _draft_from_mapping(data: dict[str, object], document: KnowledgeDocument) ->
         cover_prompt=cover_prompt,
         detail_copy=detail_copy,
         detail_image_prompts=detail_image_prompts,
+        session_form_defaults=session_form_defaults,
         risk_notes=risk_notes,
     )
 
@@ -130,7 +163,9 @@ def _asset_to_result(asset: ScriptMarketingAsset) -> ScriptMarketingAssetResult:
         versionId=asset.version_id,
         assetId=asset.id,
         versionNo=asset.version_no,
-        status=asset.status.value if hasattr(asset.status, "value") else str(asset.status),
+        status=(
+            asset.status.value if hasattr(asset.status, "value") else str(asset.status)
+        ),
         managerFeedback=asset.manager_feedback,
         title=asset.title,
         summary=asset.summary,
@@ -142,7 +177,12 @@ def _asset_to_result(asset: ScriptMarketingAsset) -> ScriptMarketingAssetResult:
         detailCopy=asset.detail_copy,
         detailImagePrompts=asset.detail_image_prompts,
         detailImageUrls=asset.detail_image_urls,
-        imageStatus=asset.image_status.value if hasattr(asset.image_status, "value") else str(asset.image_status),
+        sessionFormDefaults=asset.session_form_defaults,
+        imageStatus=(
+            asset.image_status.value
+            if hasattr(asset.image_status, "value")
+            else str(asset.image_status)
+        ),
         imageErrorMessage=asset.image_error_message,
         riskNotes=asset.risk_notes,
         sources=asset.sources,
@@ -181,39 +221,29 @@ async def _generate_draft(
     document: KnowledgeDocument,
     payload: ScriptMarketingGenerateRequest,
     context: str,
+    profile_context: str,
 ) -> _MarketingDraft:
     messages = [
         {
             "role": "system",
-            "content": (
-                "你是剧本杀门店的 AI 运营助手，擅长把剧本资料转成玩家能看懂、店长能直接使用的宣传物料。"
-                "必须基于给定 RAG 上下文，不要编造关键剧情；默认不剧透凶手、隐藏身份、最终反转和 DM 手册答案。"
-                "图片提示词要描述画面、风格、氛围、构图和禁忌，不要包含真实明星/IP侵权元素。"
-                "卖点、适合人群、标签必须使用中文短词，禁止输出 mystery_hardcore、mechanism 等英文枚举。"
-                "Return valid JSON."
-            ),
+            "content": MARKETING_SYSTEM_PROMPT,
         },
         {
             "role": "user",
-            "content": (
-                f"剧本名称：{document.name}\n"
-                f"剧本类型：{document.script_genre or '未分类'}\n"
-                f"已有标签：{', '.join(document.tags or []) or '暂无'}\n"
-                f"使用场景：{_purpose_label(payload.purpose)}\n"
-                f"语气风格：{payload.tone}\n"
-                f"是否避免剧透：{payload.avoid_spoilers}\n"
-                f"额外要求：{payload.extra_requirement or '无'}\n\n"
-                f"RAG 上下文：\n{context}\n\n"
-                "请只返回 JSON 对象，字段必须包含："
-                "title, summary, selling_points, suitable_players, tags, cover_prompt, detail_copy, detail_image_prompts, risk_notes。"
-                "其中 selling_points、suitable_players、tags 必须全部是中文。"
+            "content": build_marketing_user_prompt(
+                document=document,
+                payload=payload,
+                profile_context=profile_context,
+                rag_context=context,
             ),
         },
     ]
 
     try:
-        return await structured_chat_completion(_MarketingDraft, messages, temperature=0.4, max_tokens=1800)
-    except Exception:
+        return await structured_chat_completion(
+            _MarketingDraft, messages, temperature=0.4, max_tokens=1800
+        )
+    except Exception:  # noqa: BLE001 - 结构化输出失败时，需要降级为普通 JSON 输出重试。
         try:
             raw = await chat_completion(
                 messages,
@@ -222,11 +252,56 @@ async def _generate_draft(
                 response_format={"type": "json_object"},
             )
         except Exception as error:
-            raise ScriptMarketingGenerationError("AI 生成物料失败，请检查模型配置或稍后重试") from error
+            raise ScriptMarketingGenerationError(
+                "AI 生成物料失败，请检查模型配置或稍后重试"
+            ) from error
         try:
             return _draft_from_mapping(_extract_json_object(raw), document)
-        except (ValidationError, ValueError, json.JSONDecodeError) as error:
-            raise ScriptMarketingGenerationError("AI 生成物料失败，请稍后重试或检查模型 JSON 输出能力") from error
+        except (ValidationError, ValueError, TypeError, json.JSONDecodeError) as error:
+            raise ScriptMarketingGenerationError(
+                "AI 生成物料失败，请稍后重试或检查模型 JSON 输出能力"
+            ) from error
+
+
+async def get_best_script_profile(
+    db: AsyncSession,
+    *,
+    store_id: uuid.UUID,
+    document_id: uuid.UUID,
+) -> ScriptProfile | None:
+    """获取当前剧本最可信的剧本档案。
+
+    优先级：
+    1. 店长已确认 approved 的档案
+    2. 最新生成的档案
+    """
+
+    approved_stmt = (
+        select(ScriptProfile)
+        .where(
+            ScriptProfile.store_id == store_id,
+            ScriptProfile.document_id == document_id,
+            ScriptProfile.review_status == "approved",
+        )
+        .order_by(ScriptProfile.updated_at.desc())
+        .limit(1)
+    )
+    approved_result = await db.execute(approved_stmt)
+    approved_profile = approved_result.scalar_one_or_none()
+    if approved_profile is not None:
+        return approved_profile
+
+    latest_stmt = (
+        select(ScriptProfile)
+        .where(
+            ScriptProfile.store_id == store_id,
+            ScriptProfile.document_id == document_id,
+        )
+        .order_by(ScriptProfile.updated_at.desc())
+        .limit(1)
+    )
+    latest_result = await db.execute(latest_stmt)
+    return latest_result.scalar_one_or_none()
 
 
 async def generate_script_marketing_assets(
@@ -248,7 +323,14 @@ async def generate_script_marketing_assets(
     if document is None or document.active_version_id is None:
         raise KnowledgeDocumentNotFoundError("剧本资源不存在或还没有有效版本")
 
-    query = _build_query(document, payload)
+    profile = await get_best_script_profile(
+        db,
+        store_id=store_id,
+        document_id=document.id,
+    )
+    profile_context = format_script_profile_for_marketing(profile)
+
+    query = build_marketing_retrieval_query(document, payload)
     retrieved = await KnowledgeRetriever(db).retrieve(
         document_id=document.id,
         version_id=document.active_version_id,
@@ -257,18 +339,30 @@ async def generate_script_marketing_assets(
     )
     context, sources = _format_context(retrieved.results)
     if not context:
-        raise KnowledgeDocumentNotFoundError("当前剧本还没有可用于生成物料的 RAG 内容，请先完成文件识别、内容整理和 AI 索引")
-
-    draft = await _generate_draft(document=document, payload=payload, context=context)
-    version_no = int(
-        await db.scalar(
-            select(func.count()).select_from(ScriptMarketingAsset).where(
-                ScriptMarketingAsset.store_id == store_id,
-                ScriptMarketingAsset.document_id == document.id,
-            )
+        raise KnowledgeDocumentNotFoundError(
+            "当前剧本还没有可用于生成物料的 RAG 内容，请先完成文件识别、内容整理和 AI 索引"
         )
-        or 0
-    ) + 1
+
+    draft = await _generate_draft(
+        document=document,
+        payload=payload,
+        context=context,
+        profile_context=profile_context,
+    )
+    version_no = (
+        int(
+            await db.scalar(
+                select(func.count())
+                .select_from(ScriptMarketingAsset)
+                .where(
+                    ScriptMarketingAsset.store_id == store_id,
+                    ScriptMarketingAsset.document_id == document.id,
+                )
+            )
+            or 0
+        )
+        + 1
+    )
     asset = ScriptMarketingAsset(
         id=uuid.uuid4(),
         store_id=store_id,
@@ -286,6 +380,7 @@ async def generate_script_marketing_assets(
         cover_prompt=draft.cover_prompt,
         detail_copy=draft.detail_copy,
         detail_image_prompts=draft.detail_image_prompts,
+        session_form_defaults=draft.session_form_defaults,
         risk_notes=draft.risk_notes,
         sources=sources,
         status=ScriptMarketingAssetStatus.DRAFT,
@@ -293,6 +388,7 @@ async def generate_script_marketing_assets(
     )
     db.add(asset)
     await db.flush()
+    await db.refresh(asset)
     return _asset_to_result(asset)
 
 
@@ -310,12 +406,19 @@ async def list_script_marketing_assets(
     if status is not None:
         filters.append(ScriptMarketingAsset.status == status)
     rows = (
-        await db.execute(
-            select(ScriptMarketingAsset)
-            .where(*filters)
-            .order_by(ScriptMarketingAsset.version_no.desc(), ScriptMarketingAsset.created_at.desc())
+        (
+            await db.execute(
+                select(ScriptMarketingAsset)
+                .where(*filters)
+                .order_by(
+                    ScriptMarketingAsset.version_no.desc(),
+                    ScriptMarketingAsset.created_at.desc(),
+                )
+            )
         )
-    ).scalars().all()
+        .scalars()
+        .all()
+    )
     return [_asset_to_result(item) for item in rows]
 
 
@@ -341,6 +444,7 @@ async def approve_script_marketing_asset(
     asset.approved_by_user_id = user_id
     asset.approved_at = datetime.now(UTC)
     await db.flush()
+    await db.refresh(asset)
     return _asset_to_result(asset)
 
 
@@ -390,7 +494,9 @@ async def generate_script_marketing_images(
         if payload.include_detail:
             detail_keys = []
             detail_urls = []
-            for index, prompt in enumerate((asset.detail_image_prompts or [])[:3], start=1):
+            for index, prompt in enumerate(
+                (asset.detail_image_prompts or [])[:3], start=1
+            ):
                 image_key, image_url = await _generate_and_store_image(
                     store_id=store_id,
                     asset_id=asset.id,
@@ -414,4 +520,5 @@ async def generate_script_marketing_images(
     asset.image_status = ScriptMarketingImageStatus.READY
     asset.image_error_message = None
     await db.flush()
+    await db.refresh(asset)
     return _asset_to_result(asset)

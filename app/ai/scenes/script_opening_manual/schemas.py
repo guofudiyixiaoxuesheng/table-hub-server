@@ -39,6 +39,29 @@ class OpeningManualSectionResult(BaseModel):
     source_count: int = Field(default=0, alias="sourceCount")
 
 
+class OpeningManualTimelineItem(BaseModel):
+    """主持人开本时间线中的一个执行节点。"""
+
+    model_config = ConfigDict(populate_by_name=True, validate_by_name=True)
+
+    stage: str
+    dm_action: str = Field(alias="dmAction")
+    player_action: str = Field(default="", alias="playerAction")
+    materials: list[str] = Field(default_factory=list)
+    risk_notes: list[str] = Field(default_factory=list, alias="riskNotes")
+    source: str | None = None
+
+
+class OpeningManualTimelineResult(BaseModel):
+    """LLM 抽取的结构化开本时间线。"""
+
+    model_config = ConfigDict(populate_by_name=True, validate_by_name=True)
+
+    timeline: list[OpeningManualTimelineItem] = Field(default_factory=list)
+    missing_info: list[str] = Field(default_factory=list, alias="missingInfo")
+    risk_notes: list[str] = Field(default_factory=list, alias="riskNotes")
+
+
 class OpeningManualValidationResult(BaseModel):
     """主持人手册 LLM 审核结果。"""
 
@@ -70,6 +93,7 @@ class OpeningManualResult(BaseModel):
     target_dm_level: str = Field(alias="targetDmLevel")
     status: str
     sections: list[OpeningManualSectionResult]
+    timeline: list[OpeningManualTimelineItem] = Field(default_factory=list)
     sources: list[str]
     markdown_preview: str | None = Field(default=None, alias="markdownPreview")
     markdown: str | None = None

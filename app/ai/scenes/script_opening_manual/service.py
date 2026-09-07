@@ -11,6 +11,8 @@ from app.ai.scenes.script_opening_manual.schemas import (
     OpeningManualGenerateRequest,
     OpeningManualResult,
     OpeningManualSectionResult,
+    OpeningManualTimelineItem,
+    OpeningManualTimelineResult,
     OpeningManualValidationResult,
     ScriptFacts,
 )
@@ -30,10 +32,12 @@ from app.ai.scenes.script_opening_manual.prompts import (
     MANUAL_SYSTEM_PROMPT,
     MANUAL_VALIDATION_SYSTEM_PROMPT,
     SECTION_SPECS,
+    SCRIPT_FACTS_SYSTEM_PROMPT,
+    TIMELINE_SYSTEM_PROMPT,
     build_manual_validation_prompt,
     build_section_prompt,
-    SCRIPT_FACTS_SYSTEM_PROMPT,
     build_script_facts_prompt,
+    build_timeline_prompt,
 )
 from app.integrations.llm.client import chat_completion
 
@@ -240,6 +244,11 @@ def to_opening_manual_result(
             return int(value)
         return default
 
+    def to_str_list(value: object) -> list[str]:
+        if not isinstance(value, list):
+            return []
+        return [str(part) for part in value if str(part).strip()]
+
     sections = [
         OpeningManualSectionResult(
             key=str(item.get("key", "")),
@@ -248,6 +257,17 @@ def to_opening_manual_result(
             sourceCount=to_int(item.get("sourceCount", item.get("source_count", 0))),
         )
         for item in manual.sections
+    ]
+    timeline = [
+        OpeningManualTimelineItem(
+            stage=str(item.get("stage", "")),
+            dmAction=str(item.get("dmAction", item.get("dm_action", ""))),
+            playerAction=str(item.get("playerAction", item.get("player_action", ""))),
+            materials=to_str_list(item.get("materials", [])),
+            riskNotes=to_str_list(item.get("riskNotes", item.get("risk_notes", []))),
+            source=str(item.get("source", "")) or None,
+        )
+        for item in manual.timeline
     ]
 
     return OpeningManualResult(
@@ -260,6 +280,7 @@ def to_opening_manual_result(
         targetDmLevel=manual.target_dm_level,
         status=manual.status.value,
         sections=sections,
+        timeline=timeline,
         sources=manual.sources,
         markdownPreview=manual.markdown_preview,
         markdown=markdown,
@@ -305,6 +326,132 @@ def build_empty_manual_markdown(
     return "\n".join(lines)
 
 
+def build_opening_timeline_from_facts(
+    script_facts: dict[str, object],
+) -> list[dict[str, object]]:
+    """把全局事实锚点中的时间线转成前端更好展示的开本节点。
+
+    这是第一版轻量实现：不额外消耗模型 token，只基于已经抽取出的 timeline 做结构化。
+    后续如果要更准，可以新增独立 LLM 节点生成 stage/dmAction/playerAction/materials/riskNotes。
+    """
+
+    raw_timeline = script_facts.get("timeline", [])
+    if not isinstance(raw_timeline, list):
+        return []
+
+    timeline: list[dict[str, object]] = []
+    for index, item in enumerate(raw_timeline, start=1):
+        text = str(item).strip()
+        if not text:
+            continue
+        timeline.append(
+            {
+                "stage": f"阶段 {index}",
+                "dmAction": text,
+                "playerAction": "根据 DM 引导阅读、私聊、讨论或推进机制",
+                "materials": [],
+                "riskNotes": ["该节点由 AI 从剧本资料中提炼，正式开本前建议 DM 人工核对"],
+                "source": "全局事实锚点",
+            }
+        )
+
+    return timeline
+
+
+def escape_markdown_table_cell(value: object) -> str:
+    """避免模型输出的竖线破坏 Markdown 表格结构。"""
+
+    return str(value).replace("|", "\\|").replace("\n", "<br>")
+
+
+async def generate_opening_timeline(
+    db: AsyncSession,
+    *,
+    store_id: uuid.UUID,
+    document: KnowledgeDocument,
+    version: KnowledgeVersion,
+    script_facts: dict[str, object],
+    target_dm_level: str,
+) -> tuple[list[dict[str, object]], list[str]]:
+    """基于剧本资料生成 DM 可执行开本时间线。
+
+    这一层是主持人手册里的“流程骨架”。它比全局事实锚点更细，
+    后续 DM 开本助手可以直接复用这些节点做阶段导航。
+    """
+
+    result = await KnowledgeRetriever(db).retrieve(
+        document.id,
+        version.id,
+        store_id,
+        KnowledgeRetrieveRequest(
+            query=(
+                f"《{document.name}》 DM手册 组织者手册 开本流程 开场 第一幕 第二幕 第三幕 "
+                "第四幕 终局 复盘 结算 私聊 线索发放 BGM 控场话术 注意事项"
+            ),
+            mode="hybrid",
+            topK=20,
+        ),
+    )
+    context, sources = format_retrieval_context(result.results)
+
+    if not context.strip():
+        return build_opening_timeline_from_facts(script_facts), sources
+
+    try:
+        raw = await chat_completion(
+            messages=[
+                {"role": "system", "content": TIMELINE_SYSTEM_PROMPT},
+                {
+                    "role": "user",
+                    "content": build_timeline_prompt(
+                        script_name=document.name,
+                        context=context,
+                        script_facts=script_facts,
+                        target_dm_level=target_dm_level,
+                    ),
+                },
+            ],
+            temperature=0.1,
+            max_tokens=3200,
+            response_format={"type": "json_object"},
+        )
+        data = json.loads(raw)
+        result_data = OpeningManualTimelineResult.model_validate(data)
+        timeline = [
+            item.model_dump(mode="json", by_alias=True)
+            for item in result_data.timeline
+        ]
+        if result_data.missing_info or result_data.risk_notes:
+            timeline.append(
+                {
+                    "stage": "人工复核",
+                    "dmAction": "正式开本前，请店长或资深 DM 核对 AI 标记的缺失信息和风险点。",
+                    "playerAction": "",
+                    "materials": [],
+                    "riskNotes": [
+                        *result_data.missing_info,
+                        *result_data.risk_notes,
+                    ],
+                    "source": "AI 时间线审核",
+                }
+            )
+        return timeline or build_opening_timeline_from_facts(script_facts), sources
+
+    except Exception as error:
+        fallback = build_opening_timeline_from_facts(script_facts)
+        fallback.append(
+            {
+                "stage": "时间线生成异常",
+                "dmAction": "AI 未能稳定生成结构化时间线，请人工查看分幕流程手册。",
+                "playerAction": "",
+                "materials": [],
+                "riskNotes": [f"时间线生成失败：{error}"],
+                "source": "系统兜底",
+            }
+        )
+        return fallback, sources
+
+
 async def generate_opening_manual_content(
     db: AsyncSession,
     *,
@@ -319,8 +466,17 @@ async def generate_opening_manual_content(
         document=document,
         version=version,
     )
+    timeline, timeline_sources = await generate_opening_timeline(
+        db,
+        store_id=manual.store_id,
+        document=document,
+        version=version,
+        script_facts=script_facts,
+        target_dm_level=manual.target_dm_level,
+    )
+    manual.timeline = timeline
     section_results = []
-    all_sources = []
+    all_sources = list(timeline_sources)
     lines = []
 
     lines.append(f"# {manual.title}")
@@ -334,6 +490,27 @@ async def generate_opening_manual_content(
     lines.append("")
     lines.append("---")
     lines.append("")
+    if timeline:
+        lines.append("## 开本时间线")
+        lines.append("")
+        lines.append("| 阶段 | DM动作 | 玩家动作 | 物料 | 风险提醒 |")
+        lines.append("| --- | --- | --- | --- | --- |")
+        for item in timeline:
+            materials = item.get("materials", [])
+            risk_notes = item.get("riskNotes", item.get("risk_notes", []))
+            materials_text = "、".join(str(part) for part in materials) if isinstance(materials, list) else ""
+            risk_text = "；".join(str(part) for part in risk_notes) if isinstance(risk_notes, list) else ""
+            lines.append(
+                "| "
+                f"{escape_markdown_table_cell(item.get('stage', ''))} | "
+                f"{escape_markdown_table_cell(item.get('dmAction', item.get('dm_action', '')))} | "
+                f"{escape_markdown_table_cell(item.get('playerAction', item.get('player_action', '')))} | "
+                f"{escape_markdown_table_cell(materials_text or '无')} | "
+                f"{escape_markdown_table_cell(risk_text or '无')} |"
+            )
+        lines.append("")
+        lines.append("---")
+        lines.append("")
 
     for section in SECTION_SPECS:
         context_text, sources = await retrieve_manual_section_context(
@@ -390,6 +567,7 @@ async def generate_opening_manual_content(
 
     manual.markdown_preview = markdown[:1200]
     manual.sections = section_results
+    manual.timeline = manual.timeline or build_opening_timeline_from_facts(script_facts)
     manual.sources = all_sources
     validation_result = await validate_opening_manual(
         script_name=document.name,

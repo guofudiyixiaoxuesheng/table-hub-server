@@ -99,6 +99,13 @@ class ScriptProfile(Base):
         server_default="[]",
         comment="角色信息草稿，先用JSON保持灵活，后续稳定后可拆角色表",
     )
+    relationships: Mapped[list[dict[str, object]]] = mapped_column(
+        JSONB,
+        nullable=False,
+        default=list,
+        server_default="[]",
+        comment="人物关系边，例如 A 与 B 的亲属、恋人、敌对、阵营、秘密等关系",
+    )
     material_checklist: Mapped[list[str]] = mapped_column(
         JSONB,
         nullable=False,
@@ -133,6 +140,13 @@ class ScriptProfile(Base):
         default=list,
         server_default="[]",
         comment="生成档案引用的来源文件路径",
+    )
+    retrieval_diagnostics: Mapped[list[dict[str, object]]] = mapped_column(
+        JSONB,
+        nullable=False,
+        default=list,
+        server_default="[]",
+        comment="剧本档案生成时的多路召回诊断结果，用于排查哪些资料没有命中",
     )
     confidence_score: Mapped[int | None] = mapped_column(Integer, nullable=True, comment="AI抽取置信度/完整度，0-100")
     review_status: Mapped[ScriptProfileReviewStatus] = mapped_column(

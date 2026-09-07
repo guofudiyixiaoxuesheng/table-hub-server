@@ -16,16 +16,23 @@ class ScriptMarketingGenerateRequest(BaseModel):
 
     model_config = ConfigDict(populate_by_name=True)
 
-    purpose: str = Field(default="session_fill", pattern=r"^(script_profile|session_fill|cover_and_detail)$")
+    purpose: str = Field(
+        default="session_fill",
+        pattern=r"^(script_profile|session_fill|cover_and_detail)$",
+    )
     tone: str = Field(default="新手友好、商业宣传", max_length=80)
     avoid_spoilers: bool = Field(default=True, alias="avoidSpoilers")
-    extra_requirement: str | None = Field(default=None, alias="extraRequirement", max_length=500)
+    extra_requirement: str | None = Field(
+        default=None, alias="extraRequirement", max_length=500
+    )
 
 
 class ScriptMarketingApproveRequest(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
-    manager_feedback: str | None = Field(default=None, alias="managerFeedback", max_length=1000)
+    manager_feedback: str | None = Field(
+        default=None, alias="managerFeedback", max_length=1000
+    )
 
 
 class ScriptMarketingGenerateImagesRequest(BaseModel):
@@ -35,7 +42,9 @@ class ScriptMarketingGenerateImagesRequest(BaseModel):
 
     include_cover: bool = Field(default=True, alias="includeCover")
     include_detail: bool = Field(default=False, alias="includeDetail")
-    prompt_override: str | None = Field(default=None, alias="promptOverride", max_length=1200)
+    prompt_override: str | None = Field(
+        default=None, alias="promptOverride", max_length=1200
+    )
 
 
 class ScriptMarketingAssetResult(BaseModel):
@@ -59,6 +68,9 @@ class ScriptMarketingAssetResult(BaseModel):
     detail_copy: str = Field(alias="detailCopy")
     detail_image_prompts: list[str] = Field(alias="detailImagePrompts")
     detail_image_urls: list[str] = Field(default_factory=list, alias="detailImageUrls")
+    session_form_defaults: dict[str, object] = Field(
+        default_factory=dict, alias="sessionFormDefaults"
+    )
     image_status: str = Field(default="not_started", alias="imageStatus")
     image_error_message: str | None = Field(default=None, alias="imageErrorMessage")
     risk_notes: list[str] = Field(alias="riskNotes")

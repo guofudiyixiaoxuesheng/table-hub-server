@@ -85,6 +85,13 @@ class ScriptOpeningManual(Base):
         server_default="[]",
         comment="每个章节的生成结果摘要和状态",
     )
+    timeline: Mapped[list[dict[str, object]]] = mapped_column(
+        JSONB,
+        nullable=False,
+        default=list,
+        server_default="[]",
+        comment="开本时间线，用于记录每个阶段的DM动作、玩家动作、物料发放和风险提醒",
+    )
     sources: Mapped[list[str]] = mapped_column(
         JSONB,
         nullable=False,

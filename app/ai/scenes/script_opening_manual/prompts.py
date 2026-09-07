@@ -145,6 +145,50 @@ SCRIPT_FACTS_SYSTEM_PROMPT = (
     "请只输出 JSON，不要输出 Markdown，不要输出额外解释。"
 )
 
+TIMELINE_SYSTEM_PROMPT = (
+    "你是剧本杀门店的资深 DM 流程教练，负责把剧本资料整理成可执行的开本时间线。"
+    "必须严格基于 RAG 上下文和全局事实锚点，不要编造没有依据的幕次、线索、凶手或结局。"
+    "如果资料不足，请在 riskNotes 或 missingInfo 里标注“需人工确认”。"
+    "请只输出 JSON，不要输出 Markdown，不要输出额外解释。"
+)
+
+
+def build_timeline_prompt(
+    *,
+    script_name: str,
+    context: str,
+    script_facts: dict[str, object],
+    target_dm_level: str,
+) -> str:
+    facts_text = json.dumps(script_facts, ensure_ascii=False, indent=2)
+    return (
+        f"剧本名称：{script_name}\n"
+        f"目标 DM 水平：{target_dm_level}\n\n"
+        f"全局事实锚点 JSON：\n{facts_text}\n\n"
+        f"RAG 上下文：\n{context}\n\n"
+        "请生成“DM 可执行开本时间线”，并只输出 JSON 对象：\n"
+        "{\n"
+        '  "timeline": [\n'
+        "    {\n"
+        '      "stage": "开本前准备 / 开场 / 第一幕 / 第二幕 / 私聊 / 机制 / 终局 / 复盘 等",\n'
+        '      "dmAction": "DM 在这个阶段具体要做什么、说什么、发什么、控什么节奏",\n'
+        '      "playerAction": "玩家在这个阶段应该阅读、介绍、私聊、讨论、投票或结算什么",\n'
+        '      "materials": ["本阶段需要发放或准备的线索、道具、表格、BGM；没有则空数组"],\n'
+        '      "riskNotes": ["本阶段的剧透、规则、情绪、超时或安全风险；没有则空数组"],\n'
+        '      "source": "主要依据来源文件名或章节；无法定位则写需人工确认"\n'
+        "    }\n"
+        "  ],\n"
+        '  "missingInfo": ["缺少的信息；没有则空数组"],\n'
+        '  "riskNotes": ["整体风险；没有则空数组"]\n'
+        "}\n\n"
+        "要求：\n"
+        "1. 时间线必须按真实开本顺序排列，优先识别“开本前、开场、分幕、私聊、机制、投票、复盘、结算”。\n"
+        "2. 每个节点要让新手 DM 看完就知道下一步怎么做，禁止只写抽象总结。\n"
+        "3. 不确定的幕次、物料、话术、结局，必须写“需人工确认”，不要猜。\n"
+        "4. 如果资料只有玩家本，没有 DM 手册，就明确标注风险。\n"
+        "5. 输出必须是合法 JSON。"
+    )
+
 
 def build_script_facts_prompt(
     *,
