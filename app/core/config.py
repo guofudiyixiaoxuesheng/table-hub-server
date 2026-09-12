@@ -32,7 +32,9 @@ class Settings(BaseSettings):
         "http://127.0.0.1:3000,http://127.0.0.1:3001,"
         "http://192.168.1.116:3000"
     )
-    CORS_ORIGIN_REGEX: str | None = r"http://(localhost|127\.0\.0\.1|192\.168\.\d{1,3}\.\d{1,3}):300\d"
+    CORS_ORIGIN_REGEX: str | None = (
+        r"http://(localhost|127\.0\.0\.1|192\.168\.\d{1,3}\.\d{1,3}):300\d"
+    )
 
     @property
     def database_url(self) -> str:
@@ -50,6 +52,14 @@ class Settings(BaseSettings):
             origin.strip() for origin in self.CORS_ORIGINS.split(",") if origin.strip()
         ]
 
+    # AI provider
+    # LLM_PROVIDER: qwen / deepseek
+    LLM_PROVIDER: str = "qwen"
+    # IMAGE_GENERATION_PROVIDER: qwen / disabled
+    IMAGE_GENERATION_PROVIDER: str = "disabled"
+    # true 时只生成并保存最终 Prompt，不会调用外部文生图接口或产生生图费用。
+    IMAGE_GENERATION_DRY_RUN: bool = True
+
     # DeepSeek API
     DEEPSEEK_API_KEY: str | None = None
     DEEPSEEK_BASE_URL: str = "https://api.deepseek.com"
@@ -59,9 +69,19 @@ class Settings(BaseSettings):
     QWEN_API_KEY: str | None = None
     QWEN_BASE_URL: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
     QWEN_MODEL: str = "qwen3.5-omni-plus"
+    # 仅用于图片 caption / 视觉规律分析，可与普通聊天模型分开配置。
+    QWEN_VISION_MODEL: str = "qwen3.5-omni-plus"
     QWEN_IMAGE_MODEL: str = "wanx2.1-t2i-turbo"
     QWEN_IMAGE_SIZE: str = "1024*1024"
-    QWEN_IMAGE_API_URL: str = "https://dashscope.aliyuncs.com/api/v1/services/aigc/text2image/image-synthesis"
+    # 运营海报默认竖版；保留 QWEN_IMAGE_SIZE 供其他方图任务使用。
+    QWEN_IMAGE_POSTER_SIZE: str = "720*1280"
+    QWEN_IMAGE_API_URL: str = (
+        "https://dashscope.aliyuncs.com/api/v1/services/aigc/text2image/image-synthesis"
+    )
+    # qwen-image-* 系列使用多模态生成端点，和 wanx2.1 的文生图端点不同。
+    QWEN_IMAGE_MULTIMODAL_API_URL: str = (
+        "https://dashscope.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation"
+    )
     QWEN_IMAGE_TASK_URL: str = "https://dashscope.aliyuncs.com/api/v1/tasks"
     QWEN_IMAGE_POLL_INTERVAL_SECONDS: float = 2.0
     QWEN_IMAGE_POLL_TIMEOUT_SECONDS: float = 120.0

@@ -64,6 +64,20 @@ class ScriptMarketingAsset(Base):
     )
     manager_feedback: Mapped[str | None] = mapped_column(Text, nullable=True)
     title: Mapped[str] = mapped_column(String(200), nullable=False)
+    usage_type: Mapped[str] = mapped_column(
+        String(60),
+        nullable=False,
+        default="session_recruiting",
+        server_default="session_recruiting",
+        comment="物料用途类型，例如 session_recruiting=拼车招募，moments=朋友圈宣传，newbie=新手友好，holiday=节日活动，custom=自定义",
+    )
+    usage_label: Mapped[str] = mapped_column(
+        String(80),
+        nullable=False,
+        default="拼车招募版",
+        server_default="拼车招募版",
+        comment="物料用途中文名称，例如拼车招募版、朋友圈种草版、新手友好版",
+    )
     summary: Mapped[str] = mapped_column(Text, nullable=False)
     selling_points: Mapped[list[str]] = mapped_column(
         JSONB, nullable=False, default=list, server_default="[]"
@@ -75,6 +89,15 @@ class ScriptMarketingAsset(Base):
         JSONB, nullable=False, default=list, server_default="[]"
     )
     cover_prompt: Mapped[str] = mapped_column(Text, nullable=False)
+    style_profile_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("script_art_reference_style_profiles.id", ondelete="SET NULL"),
+        nullable=True,
+        comment="创建该物料时选定的美术素材库视觉规律档案",
+    )
+    final_image_prompts: Mapped[dict[str, object]] = mapped_column(
+        JSONB, nullable=False, default=dict, server_default="{}",
+        comment="实际发送给生图模型的最终提示词，含视觉规律档案叠加结果",
+    )
     cover_image_key: Mapped[str | None] = mapped_column(String(1024), nullable=True)
     cover_image_url: Mapped[str | None] = mapped_column(String(2048), nullable=True)
     detail_copy: Mapped[str] = mapped_column(Text, nullable=False)
@@ -94,6 +117,27 @@ class ScriptMarketingAsset(Base):
         server_default="{}",
         comment="创建场次时可一键填充的表单默认值，例如标题、简介、人数、时长、价格建议和备注",
     )
+    player_card: Mapped[dict[str, object]] = mapped_column(
+        JSONB,
+        nullable=False,
+        default=dict,
+        server_default="{}",
+        comment="玩家端拼车卡片物料，例如标题、副标题、简介、主图Prompt和主图URL",
+    )
+    player_detail: Mapped[dict[str, object]] = mapped_column(
+        JSONB,
+        nullable=False,
+        default=dict,
+        server_default="{}",
+        comment="玩家端详情页物料，例如详情文案、详情图Prompt和详情图URL列表",
+    )
+    moments: Mapped[dict[str, object]] = mapped_column(
+        JSONB,
+        nullable=False,
+        default=dict,
+        server_default="{}",
+        comment="朋友圈传播物料，例如朋友圈文案、海报标题、海报Prompt和海报图片URL",
+    )
     image_status: Mapped[ScriptMarketingImageStatus] = mapped_column(
         Enum(
             ScriptMarketingImageStatus,
@@ -105,6 +149,13 @@ class ScriptMarketingAsset(Base):
         server_default=ScriptMarketingImageStatus.NOT_STARTED.value,
     )
     image_error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    image_generations: Mapped[list[dict[str, object]]] = mapped_column(
+        JSONB,
+        nullable=False,
+        default=list,
+        server_default="[]",
+        comment="每次图片生成的任务记录、最终提示词、图片地址与失败原因",
+    )
     risk_notes: Mapped[list[str]] = mapped_column(
         JSONB, nullable=False, default=list, server_default="[]"
     )

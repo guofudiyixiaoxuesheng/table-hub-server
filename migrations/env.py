@@ -7,21 +7,37 @@ from alembic import context
 from sqlalchemy import pool
 from sqlalchemy.ext.asyncio import async_engine_from_config
 
+from app.ai.scenes.script_art_reference.models import (  # noqa: F401
+    ScriptArtReferenceImage,
+    ScriptArtReferencePackage,
+    ScriptArtReferenceStyleProfile,
+)
+from app.ai.scenes.script_marketing.models import ScriptMarketingAsset  # noqa: F401
+from app.ai.scenes.script_opening_manual.models import ScriptOpeningManual  # noqa: F401
+from app.ai.scenes.script_visual.models import (  # noqa: F401
+    ScriptVisualAsset,
+    ScriptVisualProfile,
+    VisualStylePreset,
+)
 from app.core.config import settings
 from app.core.database import Base
+from app.modules.analytics.models import RagEvaluationJob  # noqa: F401
 from app.modules.auth.models import (  # noqa: F401
     RefreshToken,
     Store,
     StoreInvite,
     StoreMember,
 )
-from app.modules.analytics.models import RagEvaluationJob  # noqa: F401
 from app.modules.chat.models import ChatMessage, ChatSession  # noqa: F401
-from app.modules.game_session.models import GameSession, Room, SessionPlayer  # noqa: F401
+from app.modules.game_session.models import (  # noqa: F401
+    GameSession,
+    Room,
+    SessionPlayer,
+)
 from app.modules.idempotency.models import IdempotencyRecord  # noqa: F401
 from app.modules.knowledge.models import KnowledgeDocument  # noqa: F401
+from app.modules.script_profile.models import ScriptProfile  # noqa: F401
 from app.modules.user.models import StorePlayer, User  # noqa: F401
-from app.ai.scenes.script_marketing.models import ScriptMarketingAsset  # noqa: F401
 
 config = context.config
 config.set_main_option("sqlalchemy.url", settings.database_url)
