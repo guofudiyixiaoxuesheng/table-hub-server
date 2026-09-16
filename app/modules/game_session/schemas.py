@@ -35,11 +35,14 @@ class DmOptionResponse(BaseModel):
 class SessionImageAssetResponse(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
-    id: uuid.UUID
+    id: str
     label: str
     preview_url: str = Field(alias="previewUrl")
     relative_path: str | None = Field(default=None, alias="relativePath")
     page_number: int | None = Field(default=None, alias="pageNumber")
+    source: GameSessionImageSource = Field(default=GameSessionImageSource.KNOWLEDGE_ASSET)
+    source_version_no: int | None = Field(default=None, alias="sourceVersionNo")
+    source_title: str | None = Field(default=None, alias="sourceTitle")
 
 
 class RoomBase(BaseModel):

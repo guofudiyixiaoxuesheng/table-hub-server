@@ -19,6 +19,7 @@ from app.ai.scenes.script_art_reference.models import ScriptArtReferenceStylePro
 from app.ai.scenes.script_marketing.models import (
     ScriptMarketingAsset,
     ScriptMarketingAssetStatus,
+    ScriptMarketingImage,
     ScriptMarketingImageStatus,
 )
 from app.ai.scenes.script_marketing.prompts import (
@@ -36,6 +37,7 @@ from app.ai.scenes.script_marketing.schemas import (
     ScriptMarketingAssetResult,
     ScriptMarketingGenerateImagesRequest,
     ScriptMarketingGenerateRequest,
+    ScriptMarketingImageResult,
 )
 from app.core.config import settings
 from app.core.exceptions import ApplicationError
@@ -590,6 +592,39 @@ def _draft_from_mapping(
     )
 
 
+def _create_image_storage(object_keys: list[str | None]) -> OssStorage | None:
+    """只有需要私有对象临时访问链接时才初始化 OSS 客户端。
+
+    图片本身在数据库中只保存 object key。读取接口再根据 key 生成访问地址，
+    避免把 15 分钟有效的预签名 URL 当作持久数据保存。
+    """
+
+    if settings.OSS_PUBLIC_BASE_URL or not any(object_keys):
+        return None
+    try:
+        return OssStorage()
+    except RuntimeError as error:
+        logger.warning("unable to create OSS storage for marketing image preview: %s", error)
+        return None
+
+
+def _resolve_image_url(
+    *,
+    object_key: str | None,
+    stored_url: str | None,
+    storage: OssStorage | None,
+) -> str | None:
+    """返回当前可访问的图片 URL；无 key 的历史数据保留原地址兜底。"""
+
+    if not object_key:
+        return stored_url
+    if settings.OSS_PUBLIC_BASE_URL:
+        return f"{settings.OSS_PUBLIC_BASE_URL.rstrip('/')}/{object_key}"
+    if storage is None:
+        return stored_url
+    return storage.presign_get(object_key)
+
+
 def _asset_to_result(asset: ScriptMarketingAsset) -> ScriptMarketingAssetResult:
     # 列表只用于展示任务状态和图片。历史中重复返回超长 Prompt 会令 GET 响应
     # 膨胀到数十万字符，影响代理和页面渲染；最新 Prompt 仍由单独字段返回。
@@ -600,6 +635,34 @@ def _asset_to_result(asset: ScriptMarketingAsset) -> ScriptMarketingAssetResult:
         summary = dict(entry)
         summary.pop("finalImagePrompts", None)
         image_generation_summaries.append(summary)
+
+    detail_keys = list(asset.detail_image_keys or [])
+    stored_detail_urls = list(asset.detail_image_urls or [])
+    storage = _create_image_storage([asset.cover_image_key, *detail_keys])
+    cover_image_url = _resolve_image_url(
+        object_key=asset.cover_image_key,
+        stored_url=asset.cover_image_url,
+        storage=storage,
+    )
+    detail_image_urls = [
+        _resolve_image_url(
+            object_key=object_key,
+            stored_url=stored_detail_urls[index] if index < len(stored_detail_urls) else None,
+            storage=storage,
+        )
+        for index, object_key in enumerate(detail_keys)
+    ]
+    # 兼容新字段上线前只保存 URL 的老记录。
+    detail_image_urls.extend(stored_detail_urls[len(detail_keys) :])
+
+    player_card = dict(asset.player_card or {})
+    player_detail = dict(asset.player_detail or {})
+    moments = dict(asset.moments or {})
+    if cover_image_url:
+        player_card["coverImageUrl"] = cover_image_url
+        moments["posterImageUrl"] = cover_image_url
+    if detail_image_urls:
+        player_detail["imageUrls"] = detail_image_urls
 
     return ScriptMarketingAssetResult(
         documentId=asset.document_id,
@@ -620,14 +683,14 @@ def _asset_to_result(asset: ScriptMarketingAsset) -> ScriptMarketingAssetResult:
         coverPrompt=asset.cover_prompt,
         styleProfileId=asset.style_profile_id,
         finalImagePrompts=asset.final_image_prompts or {},
-        coverImageUrl=asset.cover_image_url,
+        coverImageUrl=cover_image_url,
         detailCopy=asset.detail_copy,
         detailImagePrompts=asset.detail_image_prompts,
-        detailImageUrls=asset.detail_image_urls,
+        detailImageUrls=detail_image_urls,
         sessionFormDefaults=asset.session_form_defaults,
-        playerCard=asset.player_card,
-        playerDetail=asset.player_detail,
-        moments=asset.moments,
+        playerCard=player_card,
+        playerDetail=player_detail,
+        moments=moments,
         imageStatus=(
             asset.image_status.value
             if hasattr(asset.image_status, "value")
@@ -639,6 +702,32 @@ def _asset_to_result(asset: ScriptMarketingAsset) -> ScriptMarketingAssetResult:
         sources=asset.sources,
         createdAt=asset.created_at,
         approvedAt=asset.approved_at,
+    )
+
+
+def _marketing_image_to_result(
+    image: ScriptMarketingImage,
+    *,
+    source_version_no: int | None,
+    source_title: str | None,
+    storage: OssStorage | None = None,
+) -> ScriptMarketingImageResult:
+    return ScriptMarketingImageResult(
+        id=str(image.id),
+        documentId=image.document_id,
+        sourceAssetId=image.source_asset_id,
+        sourceVersionNo=source_version_no,
+        sourceTitle=source_title,
+        imageKind=image.image_kind,
+        status=image.status,
+        imageUrl=_resolve_image_url(
+            object_key=image.object_key,
+            stored_url=image.image_url,
+            storage=storage,
+        ),
+        finalPrompt=image.final_prompt,
+        errorMessage=image.error_message,
+        createdAt=image.created_at,
     )
 
 
@@ -937,6 +1026,103 @@ async def list_script_marketing_assets(
     return [_asset_to_result(item) for item in rows]
 
 
+async def list_script_marketing_images(
+    *,
+    store_id: uuid.UUID,
+    document_id: uuid.UUID,
+    db: AsyncSession,
+) -> list[ScriptMarketingImageResult]:
+    """列出剧本级图片素材库；来源物料只作追溯，不作为可用范围限制。"""
+
+    rows = (
+        await db.execute(
+            select(ScriptMarketingImage, ScriptMarketingAsset.version_no, ScriptMarketingAsset.title)
+            .outerjoin(ScriptMarketingAsset, ScriptMarketingImage.source_asset_id == ScriptMarketingAsset.id)
+            .where(
+                ScriptMarketingImage.store_id == store_id,
+                ScriptMarketingImage.document_id == document_id,
+            )
+            .order_by(ScriptMarketingImage.created_at.desc())
+        )
+    ).all()
+    storage = _create_image_storage([image.object_key for image, _, _ in rows])
+    results = [
+        _marketing_image_to_result(
+            image,
+            source_version_no=version_no,
+            source_title=title,
+            storage=storage,
+        )
+        for image, version_no, title in rows
+    ]
+
+    # 新表上线前已经生成的图片仍要在素材库可见；运行时兼容旧资产，避免迁移时依赖
+    # PostgreSQL 的 UUID 扩展或在数据库内复制超长的生图记录。
+    known_keys = {image.object_key for image, _, _ in rows if image.object_key}
+    known_urls = {item.image_url for item in results if item.image_url}
+    legacy_assets = (
+        await db.scalars(
+            select(ScriptMarketingAsset)
+            .where(
+                ScriptMarketingAsset.store_id == store_id,
+                ScriptMarketingAsset.document_id == document_id,
+            )
+            .order_by(ScriptMarketingAsset.created_at.desc())
+        )
+    ).all()
+    legacy_keys = [
+        key
+        for asset in legacy_assets
+        for key in [asset.cover_image_key, *(asset.detail_image_keys or [])]
+        if key
+    ]
+    legacy_storage = storage or _create_image_storage(legacy_keys)
+    for asset in legacy_assets:
+        detail_keys = list(asset.detail_image_keys or [])
+        detail_urls = list(asset.detail_image_urls or [])
+        legacy_images = [
+            ("cover", asset.cover_image_key, asset.cover_image_url),
+            *[
+                (
+                    "detail",
+                    object_key,
+                    detail_urls[index] if index < len(detail_urls) else None,
+                )
+                for index, object_key in enumerate(detail_keys)
+            ],
+            *[("detail", None, url) for url in detail_urls[len(detail_keys) :]],
+        ]
+        for index, (image_kind, object_key, stored_url) in enumerate(legacy_images):
+            image_url = _resolve_image_url(
+                object_key=object_key,
+                stored_url=stored_url,
+                storage=legacy_storage,
+            )
+            if object_key and object_key in known_keys:
+                continue
+            if not image_url or image_url in known_urls:
+                continue
+            results.append(
+                ScriptMarketingImageResult(
+                    id=f"legacy-{asset.id}-{image_kind}-{index}",
+                    documentId=asset.document_id,
+                    sourceAssetId=asset.id,
+                    sourceVersionNo=asset.version_no,
+                    sourceTitle=asset.title,
+                    imageKind=image_kind,
+                    status="ready",
+                    imageUrl=image_url,
+                    finalPrompt=None,
+                    errorMessage=None,
+                    createdAt=asset.updated_at,
+                )
+            )
+            if object_key:
+                known_keys.add(object_key)
+            known_urls.add(image_url)
+    return sorted(results, key=lambda item: item.created_at or datetime.min.replace(tzinfo=UTC), reverse=True)
+
+
 async def approve_script_marketing_asset(
     *,
     store_id: uuid.UUID,
@@ -1003,11 +1189,18 @@ async def generate_script_marketing_images(
     try:
         cover_prompt: str | None = None
         detail_prompts: list[str] = []
+        cover_base_prompt = asset.cover_prompt
+        if payload.prompt_override:
+            cover_base_prompt = (
+                f"{cover_base_prompt}\n\n"
+                "【本次店长画面增量意见：高优先级，但不得推翻已有剧本语境、剧情安全边界与构图约束】\n"
+                f"{payload.prompt_override.strip()}"
+            )
         if payload.include_cover:
             cover_prompt = await _apply_art_style_profile(
                 store_id=store_id,
                 profile_id=payload.style_profile_id or asset.style_profile_id,
-                base_prompt=payload.prompt_override or asset.cover_prompt,
+                base_prompt=cover_base_prompt,
                 asset=asset,
                 script_visual_context=script_visual_context,
                 script_role_names=script_role_names,
@@ -1039,6 +1232,18 @@ async def generate_script_marketing_images(
             # 提示词验收阶段：到此为止，严禁调用千问或写入 OSS 图片。
             asset.image_status = ScriptMarketingImageStatus.READY
             asset.image_error_message = None
+            if generation_id:
+                pending_images = (
+                    await db.scalars(
+                        select(ScriptMarketingImage).where(
+                            ScriptMarketingImage.source_asset_id == asset.id,
+                            ScriptMarketingImage.generation_id == generation_id,
+                        )
+                    )
+                ).all()
+                for image in pending_images:
+                    image.status = "ready"
+                    image.final_prompt = cover_prompt if image.image_kind == "cover" else None
             _update_image_generation(
                 asset,
                 generation_id,
@@ -1052,12 +1257,10 @@ async def generate_script_marketing_images(
         storage = OssStorage()
         image_client = QwenImageClient()
         cover_key = asset.cover_image_key
-        cover_url = asset.cover_image_url
         detail_keys = list(asset.detail_image_keys or [])
-        detail_urls = list(asset.detail_image_urls or [])
 
         if cover_prompt:
-            cover_key, cover_url = await _generate_and_store_image(
+            cover_key, _ = await _generate_and_store_image(
                 store_id=store_id,
                 asset_id=asset.id,
                 image_client=image_client,
@@ -1065,11 +1268,25 @@ async def generate_script_marketing_images(
                 prompt=cover_prompt,
                 filename="cover.png",
             )
+            if generation_id:
+                cover_image = await db.scalar(
+                    select(ScriptMarketingImage).where(
+                        ScriptMarketingImage.source_asset_id == asset.id,
+                        ScriptMarketingImage.generation_id == generation_id,
+                        ScriptMarketingImage.image_kind == "cover",
+                    )
+                )
+                if cover_image:
+                    cover_image.status = "ready"
+                    cover_image.object_key = cover_key
+                    # 预签名 URL 会过期；持久化 object key，响应时才动态签发。
+                    cover_image.image_url = None
+                    cover_image.final_prompt = cover_prompt
+                    cover_image.error_message = None
         if payload.include_detail:
             detail_keys = []
-            detail_urls = []
             for index, detail_prompt in enumerate(detail_prompts, start=1):
-                image_key, image_url = await _generate_and_store_image(
+                image_key, _ = await _generate_and_store_image(
                     store_id=store_id,
                     asset_id=asset.id,
                     image_client=image_client,
@@ -1078,10 +1295,36 @@ async def generate_script_marketing_images(
                     filename=f"detail-{index}.png",
                 )
                 detail_keys.append(image_key)
-                detail_urls.append(image_url)
+                db.add(
+                    ScriptMarketingImage(
+                        store_id=store_id,
+                        document_id=asset.document_id,
+                        source_asset_id=asset.id,
+                        generation_id=generation_id,
+                        image_kind="detail",
+                        status="ready",
+                        object_key=image_key,
+                        image_url=None,
+                        final_prompt=detail_prompt,
+                        style_profile_id=payload.style_profile_id or asset.style_profile_id,
+                    )
+                )
     except Exception as error:
         asset.image_status = ScriptMarketingImageStatus.FAILED
         asset.image_error_message = str(error)
+        if generation_id:
+            pending_images = (
+                await db.scalars(
+                    select(ScriptMarketingImage).where(
+                        ScriptMarketingImage.source_asset_id == asset.id,
+                        ScriptMarketingImage.generation_id == generation_id,
+                        ScriptMarketingImage.status == "generating",
+                    )
+                )
+            ).all()
+            for image in pending_images:
+                image.status = "failed"
+                image.error_message = str(error)
         _update_image_generation(
             asset,
             generation_id,
@@ -1093,17 +1336,16 @@ async def generate_script_marketing_images(
         raise
 
     asset.cover_image_key = cover_key
-    asset.cover_image_url = cover_url
+    asset.cover_image_url = None
     asset.detail_image_keys = detail_keys
-    asset.detail_image_urls = detail_urls
+    asset.detail_image_urls = []
     player_card = dict(asset.player_card or {})
     player_detail = dict(asset.player_detail or {})
     moments = dict(asset.moments or {})
-    if cover_url:
-        player_card["coverImageUrl"] = cover_url
-        moments.setdefault("posterImageUrl", cover_url)
-    if detail_urls:
-        player_detail["imageUrls"] = detail_urls
+    # 这些嵌套字段以前也会把短期 URL 写入 JSONB；由 _asset_to_result 动态补回。
+    player_card.pop("coverImageUrl", None)
+    player_detail.pop("imageUrls", None)
+    moments.pop("posterImageUrl", None)
     asset.player_card = player_card
     asset.player_detail = player_detail
     asset.moments = moments
@@ -1113,8 +1355,8 @@ async def generate_script_marketing_images(
         asset,
         generation_id,
         status="ready",
-        coverImageUrl=cover_url,
-        detailImageUrls=detail_urls,
+        coverImageUrl=None,
+        detailImageUrls=[],
         finishedAt=datetime.now(UTC).isoformat(),
     )
     await db.flush()
@@ -1172,6 +1414,18 @@ async def queue_script_marketing_images(
         },
     )
     asset.image_generations = history[:50]
+    if payload.include_cover:
+        db.add(
+            ScriptMarketingImage(
+                store_id=store_id,
+                document_id=asset.document_id,
+                source_asset_id=asset.id,
+                generation_id=generation_id,
+                image_kind="cover",
+                status="generating",
+                style_profile_id=payload.style_profile_id or asset.style_profile_id,
+            )
+        )
     await db.flush()
     await db.refresh(asset)
     return _asset_to_result(asset)

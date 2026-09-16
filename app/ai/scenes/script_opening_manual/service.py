@@ -1,12 +1,30 @@
 from __future__ import annotations
 
 import json
+import math
+import re
 import uuid
+from collections import defaultdict
 from collections.abc import Mapping
 
 from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.ai.scenes.script_opening_manual.models import (
+    OpeningManualStatus,
+    ScriptOpeningManual,
+)
+from app.ai.scenes.script_opening_manual.prompts import (
+    MANUAL_SYSTEM_PROMPT,
+    MANUAL_VALIDATION_SYSTEM_PROMPT,
+    SCRIPT_FACTS_SYSTEM_PROMPT,
+    SECTION_SPECS,
+    TIMELINE_SYSTEM_PROMPT,
+    build_manual_validation_prompt,
+    build_script_facts_prompt,
+    build_section_prompt,
+    build_timeline_prompt,
+)
 from app.ai.scenes.script_opening_manual.schemas import (
     OpeningManualGenerateRequest,
     OpeningManualResult,
@@ -17,6 +35,9 @@ from app.ai.scenes.script_opening_manual.schemas import (
     ScriptFacts,
 )
 from app.core.exceptions import ApplicationError
+from app.integrations.llm.client import chat_completion
+from app.integrations.storage.oss import OssStorage
+from app.modules.knowledge.actions.retrieve_chunks import KnowledgeRetriever
 from app.modules.knowledge.models import (
     KnowledgeChunk,
     KnowledgeChunkStatus,
@@ -24,26 +45,8 @@ from app.modules.knowledge.models import (
     KnowledgeResourceType,
     KnowledgeVersion,
 )
-from app.ai.scenes.script_opening_manual.models import (
-    OpeningManualStatus,
-    ScriptOpeningManual,
-)
-from app.ai.scenes.script_opening_manual.prompts import (
-    MANUAL_SYSTEM_PROMPT,
-    MANUAL_VALIDATION_SYSTEM_PROMPT,
-    SECTION_SPECS,
-    SCRIPT_FACTS_SYSTEM_PROMPT,
-    TIMELINE_SYSTEM_PROMPT,
-    build_manual_validation_prompt,
-    build_section_prompt,
-    build_script_facts_prompt,
-    build_timeline_prompt,
-)
-from app.integrations.llm.client import chat_completion
-
-from app.modules.knowledge.actions.retrieve_chunks import KnowledgeRetriever
 from app.modules.knowledge.schemas import KnowledgeRetrieveRequest
-from app.integrations.storage.oss import OssStorage
+from app.modules.script_profile.models import ScriptProfile
 
 
 class OpeningManualError(ApplicationError):
@@ -58,6 +61,26 @@ class OpeningManualNotFoundError(ApplicationError):
 
     status_code = 404
     code = "opening_manual_not_found"
+
+
+_ACT_NUMBER_MAP = {
+    "一": 1,
+    "二": 2,
+    "三": 3,
+    "四": 4,
+    "五": 5,
+    "六": 6,
+    "七": 7,
+    "八": 8,
+    "九": 9,
+    "十": 10,
+}
+_ACT_NUMBER_PATTERN = re.compile(r"第([一二三四五六七八九十0-9]+)幕")
+_TASK_HINT_PATTERN = re.compile(
+    r"(?:你们?|本幕|当前|这一幕|此幕).{0,12}任务.{0,80}|任务.{0,80}",
+    re.DOTALL,
+)
+MAX_TIMELINE_CONTEXT_CHARS = 9_000
 
 
 async def get_opening_manual_source(
@@ -326,6 +349,137 @@ def build_empty_manual_markdown(
     return "\n".join(lines)
 
 
+def _act_sort_key(act: str) -> tuple[int, str]:
+    """将“第一幕 / 第2幕”按自然顺序排列，无法识别时保留文本排序。"""
+
+    match = _ACT_NUMBER_PATTERN.search(act)
+    if match is None:
+        return (999, act)
+    raw = match.group(1)
+    try:
+        return (int(raw), act)
+    except ValueError:
+        return (_ACT_NUMBER_MAP.get(raw, 998), act)
+
+
+def _extract_task_hints(content: str) -> list[str]:
+    """只摘取玩家本中明确出现的任务提示，不将普通剧情误作任务。"""
+
+    hints: list[str] = []
+    for match in _TASK_HINT_PATTERN.finditer(content):
+        hint = re.sub(r"\s+", " ", match.group(0)).strip(" ：:；;。")
+        if hint and hint not in hints:
+            hints.append(hint[:140])
+    return hints[:3]
+
+
+def _is_role_script_source(source_path: str) -> bool:
+    return any(marker in source_path for marker in ("角色本", "玩家本", "人物本"))
+
+
+async def extract_shared_act_structure(
+    db: AsyncSession,
+    *,
+    document_id: uuid.UUID,
+    version_id: uuid.UUID,
+) -> list[dict[str, object]]:
+    """从所有角色本的共同“第 X 幕”标题中建立可靠的分幕骨架。
+
+    这一步不依赖 LLM：同一幕在多个角色文件中重复出现，才是开本阶段的
+    强证据；每幕同时收集明确的任务措辞，供后续 DM 时间线使用。
+    """
+
+    rows = (
+        await db.execute(
+            select(KnowledgeChunk).where(
+                KnowledgeChunk.document_id == document_id,
+                KnowledgeChunk.version_id == version_id,
+                KnowledgeChunk.status == KnowledgeChunkStatus.READY,
+                KnowledgeChunk.act.is_not(None),
+            )
+        )
+    ).scalars().all()
+    if not rows:
+        return []
+
+    source_path_by_row = {
+        row.id: str((row.extra_metadata or {}).get("source_path") or "").strip()
+        for row in rows
+    }
+    # 文件命名明确时只使用角色本；资料命名不规范时才回退到全部来源。
+    use_role_sources = any(
+        _is_role_script_source(source_path)
+        for source_path in source_path_by_row.values()
+    )
+    evidence_rows = [
+        row
+        for row in rows
+        if not use_role_sources
+        or _is_role_script_source(source_path_by_row.get(row.id, ""))
+    ]
+    all_roles = {
+        str(row.role_name).strip() for row in evidence_rows if row.role_name
+    }
+    grouped: dict[str, dict[str, object]] = defaultdict(
+        lambda: {"roles": set(), "sources": set(), "taskHints": []}
+    )
+    for row in evidence_rows:
+        act = str(row.act or "").strip()
+        if not act:
+            continue
+        group = grouped[act]
+        if row.role_name:
+            group["roles"].add(str(row.role_name).strip())  # type: ignore[union-attr]
+        source = source_path_by_row.get(row.id, "")
+        if source:
+            group["sources"].add(source)  # type: ignore[union-attr]
+        for hint in _extract_task_hints(row.content):
+            task_hints = group["taskHints"]
+            if hint not in task_hints:
+                task_hints.append(hint)
+
+    total_roles = len(all_roles)
+    shared_threshold = max(2, math.ceil(total_roles * 0.5)) if total_roles else 2
+    acts: list[dict[str, object]] = []
+    for act, group in grouped.items():
+        roles = sorted(group["roles"])  # type: ignore[arg-type]
+        sources = sorted(group["sources"])  # type: ignore[arg-type]
+        acts.append(
+            {
+                "act": act,
+                "roleCount": len(roles),
+                "totalRoleCount": total_roles,
+                "isShared": len(roles) >= shared_threshold,
+                "roles": roles,
+                "taskHints": list(group["taskHints"])[:6],
+                "sources": sources[:8],
+            }
+        )
+    return sorted(acts, key=lambda item: _act_sort_key(str(item["act"])))
+
+
+async def get_profile_act_structure(
+    db: AsyncSession,
+    *,
+    store_id: uuid.UUID,
+    document_id: uuid.UUID,
+) -> list[dict[str, object]]:
+    """读取剧本档案已归并的分幕结构，供主持人手册直接复用。"""
+
+    profile = await db.scalar(
+        select(ScriptProfile)
+        .where(
+            ScriptProfile.store_id == store_id,
+            ScriptProfile.document_id == document_id,
+            ScriptProfile.deleted_at.is_(None),
+        )
+        .order_by(ScriptProfile.updated_at.desc())
+    )
+    if profile is None or not isinstance(profile.act_structure, list):
+        return []
+    return [item for item in profile.act_structure if isinstance(item, dict)]
+
+
 def build_opening_timeline_from_facts(
     script_facts: dict[str, object],
 ) -> list[dict[str, object]]:
@@ -334,6 +488,52 @@ def build_opening_timeline_from_facts(
     这是第一版轻量实现：不额外消耗模型 token，只基于已经抽取出的 timeline 做结构化。
     后续如果要更准，可以新增独立 LLM 节点生成 stage/dmAction/playerAction/materials/riskNotes。
     """
+
+    act_structure = script_facts.get("actStructure", [])
+    if isinstance(act_structure, list) and act_structure:
+        timeline: list[dict[str, object]] = []
+        for item in act_structure:
+            if not isinstance(item, dict):
+                continue
+            stage = str(item.get("act", "")).strip()
+            if not stage:
+                continue
+            player_tasks = item.get("playerTasks", item.get("taskHints", []))
+            task_text = (
+                "；".join(
+                    str(task).strip()
+                    for task in player_tasks
+                    if str(task).strip()
+                )
+                if isinstance(player_tasks, list)
+                else ""
+            )
+            summary = str(item.get("summary", "")).strip()
+            objective = str(item.get("sharedObjective", "")).strip()
+            transition = str(item.get("transitionTrigger", "")).strip()
+            risks = ["基于剧本档案的分幕结构生成，正式开本前请核对物料和转场。"]
+            if item.get("needsReview") or not objective:
+                risks.append("该幕公共目标或转场证据不足，需人工确认。")
+            timeline.append(
+                {
+                    "stage": stage,
+                    "dmAction": "；".join(
+                        part
+                        for part in [summary, transition and f"转场：{transition}"]
+                        if part
+                    )
+                    or "引导本幕阅读与讨论，按资料核对转场条件。",
+                    "playerAction": "；".join(
+                        part for part in [objective, task_text] if part
+                    )
+                    or "阅读本幕内容并按 DM 引导推进。",
+                    "materials": [],
+                    "riskNotes": risks,
+                    "source": "剧本档案分幕结构",
+                }
+            )
+        if timeline:
+            return timeline
 
     raw_timeline = script_facts.get("timeline", [])
     if not isinstance(raw_timeline, list):
@@ -389,10 +589,15 @@ async def generate_opening_timeline(
                 "第四幕 终局 复盘 结算 私聊 线索发放 BGM 控场话术 注意事项"
             ),
             mode="hybrid",
-            topK=20,
+            topK=12,
         ),
     )
     context, sources = format_retrieval_context(result.results)
+    if len(context) > MAX_TIMELINE_CONTEXT_CHARS:
+        context = (
+            f"{context[:MAX_TIMELINE_CONTEXT_CHARS]}\n"
+            "[时间线专用上下文已截断；请优先依据全局事实锚点中的 actStructure。]"
+        )
 
     if not context.strip():
         return build_opening_timeline_from_facts(script_facts), sources
@@ -412,7 +617,7 @@ async def generate_opening_timeline(
                 },
             ],
             temperature=0.1,
-            max_tokens=3200,
+            max_tokens=4200,
             response_format={"type": "json_object"},
         )
         data = json.loads(raw)
@@ -437,18 +642,8 @@ async def generate_opening_timeline(
             )
         return timeline or build_opening_timeline_from_facts(script_facts), sources
 
-    except Exception as error:
+    except Exception:
         fallback = build_opening_timeline_from_facts(script_facts)
-        fallback.append(
-            {
-                "stage": "时间线生成异常",
-                "dmAction": "AI 未能稳定生成结构化时间线，请人工查看分幕流程手册。",
-                "playerAction": "",
-                "materials": [],
-                "riskNotes": [f"时间线生成失败：{error}"],
-                "source": "系统兜底",
-            }
-        )
         return fallback, sources
 
 
@@ -466,6 +661,18 @@ async def generate_opening_manual_content(
         document=document,
         version=version,
     )
+    profile_act_structure = await get_profile_act_structure(
+        db,
+        store_id=manual.store_id,
+        document_id=document.id,
+    )
+    shared_act_structure = profile_act_structure or await extract_shared_act_structure(
+        db,
+        document_id=document.id,
+        version_id=version.id,
+    )
+    # 优先消费剧本档案的专项抽取结果；旧档案或尚未生成档案时才由手册本地兜底。
+    script_facts["actStructure"] = shared_act_structure
     timeline, timeline_sources = await generate_opening_timeline(
         db,
         store_id=manual.store_id,
@@ -490,6 +697,27 @@ async def generate_opening_manual_content(
     lines.append("")
     lines.append("---")
     lines.append("")
+    if shared_act_structure:
+        lines.append("## 已识别的共同分幕")
+        lines.append("")
+        lines.append("以下幕次由角色本中重复出现的标题自动聚合；覆盖角色较少的幕次需人工核对。")
+        lines.append("")
+        lines.append("| 幕次 | 覆盖角色 | 任务提示 |")
+        lines.append("| --- | --- | --- |")
+        for item in shared_act_structure:
+            role_count = item.get("roleCount", 0)
+            total_role_count = item.get("totalRoleCount", 0)
+            task_hints = item.get("taskHints", [])
+            task_text = "；".join(str(hint) for hint in task_hints) if isinstance(task_hints, list) else ""
+            lines.append(
+                "| "
+                f"{escape_markdown_table_cell(item.get('act', ''))} | "
+                f"{role_count}/{total_role_count or '?'} | "
+                f"{escape_markdown_table_cell(task_text or '未识别明确任务提示')} |"
+            )
+        lines.append("")
+        lines.append("---")
+        lines.append("")
     if timeline:
         lines.append("## 开本时间线")
         lines.append("")
@@ -578,6 +806,7 @@ async def generate_opening_manual_content(
 
     manual.validation_result = {
         "scriptFacts": script_facts,
+        "sharedActStructure": shared_act_structure,
         "overall": validation_result,
     }
     manual.status = OpeningManualStatus.READY

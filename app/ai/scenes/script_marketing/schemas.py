@@ -109,6 +109,24 @@ class ScriptMarketingGenerateImagesRequest(BaseModel):
     )
 
 
+class ScriptMarketingImageResult(BaseModel):
+    """剧本图片素材库中的单张图片；来源版本只用于追溯，不限制复用。"""
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    id: str
+    document_id: uuid.UUID = Field(alias="documentId")
+    source_asset_id: uuid.UUID | None = Field(default=None, alias="sourceAssetId")
+    source_version_no: int | None = Field(default=None, alias="sourceVersionNo")
+    source_title: str | None = Field(default=None, alias="sourceTitle")
+    image_kind: str = Field(alias="imageKind")
+    status: str
+    image_url: str | None = Field(default=None, alias="imageUrl")
+    final_prompt: str | None = Field(default=None, alias="finalPrompt")
+    error_message: str | None = Field(default=None, alias="errorMessage")
+    created_at: datetime | None = Field(default=None, alias="createdAt")
+
+
 class ScriptMarketingAssetResult(BaseModel):
     """剧本运营物料草稿。"""
 

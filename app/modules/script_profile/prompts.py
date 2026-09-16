@@ -17,6 +17,14 @@ SCRIPT_RELATIONSHIPS_SYSTEM_PROMPT = (
 )
 
 
+SCRIPT_ACT_STRUCTURE_SYSTEM_PROMPT = (
+    "你是剧本杀门店的资深 DM 教研负责人。"
+    "你的任务是从多个角色本、DM流程和机制资料中归并剧本的公共分幕结构。"
+    "只认定有跨角色重复标题、明确任务或转场证据的阶段；不要把某个角色的个人回忆、私密任务当成全局幕次。"
+    "只能基于上下文，不确定必须标 needsReview 和 needsReviewReasons。Return valid JSON."
+)
+
+
 def build_relationships_prompt(
     *,
     document_name: str,
@@ -60,6 +68,38 @@ def build_relationships_prompt(
         "6. displayPriority 用于前端展示排序：核心感情线/主关系优先，其次亲情友情，再其次普通阵营/背景关系。\n"
         "感情线、亲情线、友情线、家国线、师徒线、知己线、误解线、牺牲线、救赎线、遗憾线。\n"
         "如果只能判断浅层关系，也要在 needsReviewReasons 说明缺少哪些资料。\n"
+    )
+
+
+def build_act_structure_prompt(
+    *,
+    document_name: str,
+    act_context: str,
+    dm_flow_context: str,
+    mechanics_context: str,
+) -> str:
+    return (
+        f"剧本名称：{document_name}\n\n"
+        f"分幕与任务资料：\n{act_context or '未检索到明确资料。'}\n\n"
+        f"DM流程资料：\n{dm_flow_context or '未检索到明确资料。'}\n\n"
+        f"机制资料：\n{mechanics_context or '未检索到明确资料。'}\n\n"
+        "请只输出 JSON 对象，字段包含 acts, needsReviewReasons。\n"
+        "acts 按 order 升序输出，每项包含：\n"
+        "- order: 从 1 开始的公共阶段顺序\n"
+        "- act: 优先保留资料中的原始幕标题，例如第一幕；没有明确标题不要虚构\n"
+        "- summary: 本幕公共剧情/推进摘要，80字内\n"
+        "- sharedObjective: 全体或多数玩家共同要完成的目标；没有证据则 null\n"
+        "- playerTasks: 仅列可确认的公共任务或按角色分别执行但同阶段出现的任务\n"
+        "- transitionTrigger: 进入下一幕的 DM 发放、阅读结束、投票、机制结算等条件；未知则 null\n"
+        "- roleCoverageMatched / roleCoverageTotal: 根据资料中角色来源估计覆盖数量；无法可靠统计写 0\n"
+        "- sources: 本幕依据的来源文件名数组\n"
+        "- confidence: 0-100\n"
+        "- needsReview: 是否需人工确认\n\n"
+        "判断规则：\n"
+        "1. 相同或等价的幕标题在多个角色来源出现，优先视为公共幕。\n"
+        "2. “你/你们的任务”“本幕任务”“阅读至此”“请翻页”“DM发放”等是阶段边界和任务的强证据。\n"
+        "3. 个人支线、人物回忆、仅单一角色出现的内容，不得擅自当作全局幕次；可写进该幕 playerTasks 并标 needsReview。\n"
+        "4. 若没有足够证据确认总幕数，acts 可以为空，并在 needsReviewReasons 明确说明。\n"
     )
 
 

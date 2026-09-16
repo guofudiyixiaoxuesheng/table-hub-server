@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import uuid
 from dataclasses import asdict, dataclass
 
@@ -21,6 +22,8 @@ from app.modules.knowledge.schemas import (
     KnowledgeRetrieveRequest,
     KnowledgeRetrieveResponse,
 )
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True, slots=True)
@@ -216,7 +219,9 @@ def reciprocal_rank_fusion(
             **{
                 **asdict(row),
                 "score": score,
-                "score_type": "rrf" if len(score_types) > 1 else next(iter(score_types)),
+                "score_type": "rrf"
+                if len(score_types) > 1
+                else next(iter(score_types)),
             }
         )
         for row, score, score_types in fused.values()
@@ -276,7 +281,9 @@ class KnowledgeRetriever:
         store_id: uuid.UUID,
         payload: KnowledgeRetrieveRequest,
     ) -> KnowledgeRetrieveResponse:
-        version = await get_version_for_manifest(document_id, version_id, store_id, self.db)
+        version = await get_version_for_manifest(
+            document_id, version_id, store_id, self.db
+        )
         if version is None:
             raise KnowledgeDocumentNotFoundError("知识库版本不存在")
 
@@ -289,12 +296,26 @@ class KnowledgeRetriever:
                 version_id=version_id, payload=candidate_payload, db=self.db
             )
         if payload.mode in {"vector", "hybrid"}:
-            vector_rows = await _vector_search(
-                version_id=version_id,
-                payload=candidate_payload,
-                db=self.db,
-                client=self.embedding_client,
-            )
+            try:
+                vector_rows = await _vector_search(
+                    version_id=version_id,
+                    payload=candidate_payload,
+                    db=self.db,
+                    client=self.embedding_client,
+                )
+            except KnowledgeDocumentUploadError:
+                # hybrid 的关键词通道仍可用时，不因向量服务临时不可用而阻断
+                # 剧本档案、运营文案等上层工作流。
+                if payload.mode == "vector":
+                    raise
+                logger.warning(
+                    "vector retrieval unavailable; falling back to bm25",
+                    exc_info=True,
+                    extra={
+                        "document_id": str(document_id),
+                        "version_id": str(version_id),
+                    },
+                )
         merged = (
             reciprocal_rank_fusion([bm25_rows, vector_rows], top_k=candidate_top_k)
             if payload.mode == "hybrid"

@@ -9,6 +9,10 @@ from collections import Counter, defaultdict
 from dataclasses import dataclass
 from pathlib import PurePosixPath
 
+from langchain_text_splitters import (
+    MarkdownHeaderTextSplitter,
+    RecursiveCharacterTextSplitter,
+)
 from sqlalchemy import delete
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -29,8 +33,19 @@ from app.modules.knowledge.schemas import (
 )
 
 MAX_CHARS = 900
-MIN_CHARS = 150
 OVERLAP_CHARS = 100
+MARKDOWN_HEADERS = [("#", "h1"), ("##", "h2"), ("###", "h3"), ("####", "h4")]
+MARKDOWN_HEADER_SPLITTER = MarkdownHeaderTextSplitter(
+    headers_to_split_on=MARKDOWN_HEADERS,
+    # 标题作为 metadata 保存；保留在正文中会让连续标题产生仅含标题的空 chunk。
+    strip_headers=True,
+)
+RECURSIVE_TEXT_SPLITTER = RecursiveCharacterTextSplitter(
+    chunk_size=MAX_CHARS,
+    chunk_overlap=OVERLAP_CHARS,
+    length_function=len,
+    separators=["\n\n", "\n", "。", "！", "？", "；", "，", " ", ""],
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -86,61 +101,40 @@ def _classify_heading(title: str, loader_type: str) -> KnowledgeChunkType:
     return KnowledgeChunkType.NOTE
 
 
-def _extract_act(title: str, current_act: str | None) -> str | None:
+def _extract_act(title: str) -> str | None:
     match = re.search(r"第[一二三四五六七八九十0-9]+幕", title)
-    return match.group(0) if match else current_act
+    return match.group(0) if match else None
 
 
-def _split_long_content(content: str) -> list[str]:
-    paragraphs = [item.strip() for item in re.split(r"\n{2,}", content) if item.strip()]
-    chunks: list[str] = []
-    current = ""
-    for paragraph in paragraphs:
-        candidate = f"{current}\n\n{paragraph}".strip() if current else paragraph
-        if len(candidate) <= MAX_CHARS or len(current) < MIN_CHARS:
-            current = candidate
-            continue
-        chunks.append(current)
-        overlap = current[-OVERLAP_CHARS:] if len(current) > OVERLAP_CHARS else current
-        current = f"{overlap}\n\n{paragraph}".strip()
-    if current:
-        chunks.append(current)
-    return chunks
+def _heading_path(metadata: dict[str, object]) -> list[str]:
+    return [
+        str(metadata[key]).strip() for _, key in MARKDOWN_HEADERS if metadata.get(key)
+    ]
 
 
-def build_chunks(markdown: str, *, relative_path: str, loader_type: str) -> list[DraftChunk]:
-    lines = markdown.splitlines()
-    sections: list[tuple[str | None, list[str], list[str]]] = []
-    current_title: str | None = None
-    current_path: list[str] = []
-    current_body: list[str] = []
-
-    for line in lines:
-        match = re.match(r"^(#{1,4})\s+(.+?)\s*$", line)
-        if match:
-            if current_body:
-                sections.append((current_title, current_path, current_body))
-            level = len(match.group(1))
-            title = match.group(2).strip()
-            current_path = [*current_path[: level - 1], title]
-            current_title = title
-            current_body = []
-        else:
-            current_body.append(line)
-    if current_body:
-        sections.append((current_title, current_path, current_body))
-
+def build_chunks(
+    markdown: str, *, relative_path: str, loader_type: str
+) -> list[DraftChunk]:
     drafts: list[DraftChunk] = []
-    current_act: str | None = None
-    for title, heading_path, body in sections:
-        if title:
-            current_act = _extract_act(title, current_act)
-        content = "\n".join(body).strip()
+    sections = MARKDOWN_HEADER_SPLITTER.split_text(markdown)
+    for section in sections:
+        heading_path = _heading_path(section.metadata)
+        title = heading_path[-1] if heading_path else PurePosixPath(relative_path).name
+        content = section.page_content.strip()
         if not content:
             continue
         chunk_type = _classify_heading(title or "", loader_type)
-        act = _extract_act(title or "", current_act)
-        for index, piece in enumerate(_split_long_content(content), start=1):
+        act = next(
+            (
+                act
+                for heading in reversed(heading_path)
+                if (act := _extract_act(heading))
+            ),
+            None,
+        )
+        for index, piece in enumerate(
+            RECURSIVE_TEXT_SPLITTER.split_text(content), start=1
+        ):
             draft_title = title if index == 1 else f"{title} {index}"
             drafts.append(
                 DraftChunk(
@@ -176,7 +170,9 @@ async def _chunk_parsed_file(
     if parsed.status is not KnowledgeParsedFileStatus.READY or not parsed.markdown_key:
         return []
 
-    await db.execute(delete(KnowledgeChunk).where(KnowledgeChunk.parsed_file_id == parsed.id))
+    await db.execute(
+        delete(KnowledgeChunk).where(KnowledgeChunk.parsed_file_id == parsed.id)
+    )
     markdown = await storage.get_text(parsed.markdown_key)
     role_name = _guess_role_name(parsed.file.relative_path)
     rows: list[KnowledgeChunk] = []
@@ -246,7 +242,12 @@ def _summarize_chunks(
         totalFiles=total_files,
         typeCounts=dict(Counter(chunk.chunk_type.value for chunk in chunks)),
         files=sorted(file_summaries, key=lambda item: item.relative_path),
-        chunks=[_to_chunk_response(chunk) for chunk in sorted(chunks, key=lambda item: (item.file.relative_path, item.chunk_index))],
+        chunks=[
+            _to_chunk_response(chunk)
+            for chunk in sorted(
+                chunks, key=lambda item: (item.file.relative_path, item.chunk_index)
+            )
+        ],
     )
 
 

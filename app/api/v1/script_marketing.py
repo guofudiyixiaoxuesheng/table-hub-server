@@ -17,6 +17,7 @@ from app.ai.scenes.script_marketing.service import (
     generate_script_marketing_assets,
     generate_script_marketing_images,
     list_script_marketing_assets,
+    list_script_marketing_images,
     queue_script_marketing_images,
 )
 from app.common.responses import success_response
@@ -101,6 +102,22 @@ async def list_script_marketing_route(
     return success_response(
         data=[item.model_dump(mode="json", by_alias=True) for item in data]
     )
+
+
+@router.get("/{document_id}/images")
+async def list_script_marketing_images_route(
+    document_id: uuid.UUID,
+    access: StoreManagerAccess,
+    db: AsyncSession = Depends(get_database),
+):
+    """列出剧本级图片素材库，任意正式物料和场次均可复用。"""
+
+    data = await list_script_marketing_images(
+        store_id=access.store_id,
+        document_id=document_id,
+        db=db,
+    )
+    return success_response(data=[item.model_dump(mode="json", by_alias=True) for item in data])
 
 
 @router.post("/{document_id}/generate")

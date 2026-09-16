@@ -6,27 +6,41 @@ import random
 import string
 import uuid
 from datetime import UTC, date, datetime, time, timedelta
+from urllib.parse import unquote, urlparse
 
 from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+from app.ai.scenes.script_marketing.models import (
+    ScriptMarketingAsset,
+    ScriptMarketingImage,
+)
+from app.core.config import settings
 from app.core.exceptions import ApplicationError, ConflictError
-from app.modules.game_session.models import GameSession, Room, SessionJoinSource, SessionPlayer, SessionPlayerStatus
-from app.modules.game_session.models import GameSessionStatus
+from app.integrations.storage.oss import OssStorage
+from app.modules.game_session.models import (
+    GameSession,
+    GameSessionImageSource,
+    GameSessionStatus,
+    Room,
+    SessionJoinSource,
+    SessionPlayer,
+    SessionPlayerStatus,
+)
 from app.modules.game_session.schemas import (
     CreateGameSessionRequest,
+    CreateRoomRequest,
     DmOptionResponse,
     GameSessionDetailResponse,
     GameSessionResponse,
-    CreateRoomRequest,
     RoomResponse,
-    SessionImageAssetResponse,
     ScriptOptionResponse,
+    SessionImageAssetResponse,
     SessionPlayerRequest,
     SessionPlayerResponse,
-    UpdateRoomRequest,
     UpdateGameSessionRequest,
+    UpdateRoomRequest,
     UpdateSessionPlayerRequest,
 )
 from app.modules.knowledge.models import (
@@ -34,10 +48,9 @@ from app.modules.knowledge.models import (
     KnowledgeDocumentStatus,
     KnowledgeParsedAsset,
     KnowledgeParsedAssetType,
-    KnowledgeVersion,
     KnowledgeResourceType,
+    KnowledgeVersion,
 )
-from app.integrations.storage.oss import OssStorage
 from app.modules.user.models import StorePlayer, User, UserStatus
 
 
@@ -72,6 +85,73 @@ async def _unique_reservation_code(db: AsyncSession) -> str:
         if not exists:
             return code
     raise ApplicationError("预约码生成失败，请重试")
+
+
+def _marketing_image_preview_url(
+    *, object_key: str | None, stored_url: str | None, storage: OssStorage | None
+) -> str | None:
+    """运行时解析运营生图地址，避免素材选择器复用失效的预签名 URL。"""
+
+    if not object_key:
+        return stored_url
+    if settings.OSS_PUBLIC_BASE_URL:
+        return f"{settings.OSS_PUBLIC_BASE_URL.rstrip('/')}/{object_key}"
+    if storage is None:
+        return stored_url
+    return storage.presign_get(object_key)
+
+
+async def _resolve_marketing_image_reference(
+    reference: str | None,
+    *,
+    store_id: uuid.UUID,
+    db: AsyncSession,
+) -> str | None:
+    """将运营素材引用或旧预签名 URL 解析为本次请求的新访问地址。"""
+
+    if not reference:
+        return None
+
+    object_key: str | None = None
+    if reference.startswith("ai-generated://"):
+        try:
+            image_id = uuid.UUID(reference.removeprefix("ai-generated://"))
+        except ValueError:
+            return None
+        image = await db.scalar(
+            select(ScriptMarketingImage).where(
+                ScriptMarketingImage.id == image_id,
+                ScriptMarketingImage.store_id == store_id,
+                ScriptMarketingImage.status == "ready",
+            )
+        )
+        if image is None:
+            return None
+        object_key = image.object_key
+        if not object_key:
+            return image.image_url
+    else:
+        # 兼容此前已经保存到场次的 OSS 预签名 URL：签名会过期，但 URL path 中仍有对象 key。
+        candidate_key = unquote(urlparse(reference).path).lstrip("/")
+        expected_prefix = f"stores/{store_id}/script-marketing/"
+        if candidate_key.startswith(expected_prefix):
+            object_key = candidate_key
+        else:
+            image = await db.scalar(
+                select(ScriptMarketingImage).where(
+                    ScriptMarketingImage.store_id == store_id,
+                    ScriptMarketingImage.image_url == reference,
+                    ScriptMarketingImage.status == "ready",
+                )
+            )
+            if image is not None:
+                object_key = image.object_key
+
+    return _marketing_image_preview_url(
+        object_key=object_key,
+        stored_url=reference,
+        storage=(OssStorage() if object_key and not settings.OSS_PUBLIC_BASE_URL else None),
+    )
 
 
 async def _joined_seats(session_id: uuid.UUID, db: AsyncSession) -> int:
@@ -143,6 +223,12 @@ async def _asset_preview_url(
 async def _resolve_session_images(session: GameSession, db: AsyncSession) -> tuple[str | None, list[str]]:
     if session.cover_image_source == "knowledge_asset":
         cover_url = await _asset_preview_url(session.cover_image_asset_id, session.store_id, db)
+    elif session.cover_image_source == "ai_generated":
+        cover_url = await _resolve_marketing_image_reference(
+            session.cover_image_url,
+            store_id=session.store_id,
+            db=db,
+        )
     else:
         cover_url = session.cover_image_url
 
@@ -152,6 +238,19 @@ async def _resolve_session_images(session: GameSession, db: AsyncSession) -> tup
             for url in [
                 await _asset_preview_url(asset_id, session.store_id, db)
                 for asset_id in (session.detail_image_asset_ids or [])
+            ]
+            if url
+        ]
+    elif session.detail_image_source == "ai_generated":
+        detail_urls = [
+            url
+            for url in [
+                await _resolve_marketing_image_reference(
+                    reference,
+                    store_id=session.store_id,
+                    db=db,
+                )
+                for reference in (session.detail_image_urls or [])
             ]
             if url
         ]
@@ -312,7 +411,7 @@ async def list_script_image_assets(
     db: AsyncSession,
     storage: OssStorage | None = None,
 ) -> list[SessionImageAssetResponse]:
-    """列出某个剧本知识库资源解析出来的图片，供场次主图/详情图复用。"""
+    """列出剧本解析图片与运营生图素材，供场次自由复用。"""
 
     document = await db.get(KnowledgeDocument, script_document_id)
     if document is None or document.store_id != store_id or document.deleted_at is not None:
@@ -334,7 +433,7 @@ async def list_script_image_assets(
     )
     assets = (await db.scalars(statement)).all()
     oss = storage or OssStorage()
-    return [
+    knowledge_options = [
         SessionImageAssetResponse(
             id=asset.id,
             label=asset.caption
@@ -345,6 +444,82 @@ async def list_script_image_assets(
         )
         for asset in assets
     ]
+    marketing_images = (
+        await db.scalars(
+            select(ScriptMarketingImage)
+            .where(
+                ScriptMarketingImage.store_id == store_id,
+                ScriptMarketingImage.document_id == document.id,
+                ScriptMarketingImage.status == "ready",
+            )
+            .order_by(ScriptMarketingImage.created_at.desc())
+        )
+    ).all()
+    marketing_storage: OssStorage | None = oss if not settings.OSS_PUBLIC_BASE_URL else None
+    marketing_options = [
+        SessionImageAssetResponse(
+            id=image.id,
+            label=f"运营生成 · {image.image_kind}",
+            previewUrl=_marketing_image_preview_url(
+                object_key=image.object_key,
+                stored_url=image.image_url,
+                storage=marketing_storage,
+            )
+            or "",
+            relativePath=None,
+            pageNumber=None,
+            source=GameSessionImageSource.AI_GENERATED,
+        )
+        for image in marketing_images
+        if image.object_key or image.image_url
+    ]
+    known_marketing_urls = {item.preview_url for item in marketing_options}
+    known_marketing_keys = {image.object_key for image in marketing_images if image.object_key}
+    legacy_assets = (
+        await db.scalars(
+            select(ScriptMarketingAsset).where(
+                ScriptMarketingAsset.store_id == store_id,
+                ScriptMarketingAsset.document_id == document.id,
+            )
+        )
+    ).all()
+    for asset in legacy_assets:
+        detail_keys = list(asset.detail_image_keys or [])
+        detail_urls = list(asset.detail_image_urls or [])
+        legacy_images = [
+            (asset.cover_image_key, asset.cover_image_url),
+            *[
+                (object_key, detail_urls[index] if index < len(detail_urls) else None)
+                for index, object_key in enumerate(detail_keys)
+            ],
+            *[(None, url) for url in detail_urls[len(detail_keys) :]],
+        ]
+        for index, (object_key, stored_url) in enumerate(legacy_images):
+            if object_key and object_key in known_marketing_keys:
+                continue
+            image_url = _marketing_image_preview_url(
+                object_key=object_key,
+                stored_url=stored_url,
+                storage=marketing_storage,
+            )
+            if not image_url or image_url in known_marketing_urls:
+                continue
+            marketing_options.append(
+                SessionImageAssetResponse(
+                    id=f"legacy-{asset.id}-{index}",
+                    label=f"历史运营生成 · V{asset.version_no}",
+                    previewUrl=image_url,
+                    relativePath=None,
+                    pageNumber=None,
+                    source=GameSessionImageSource.AI_GENERATED,
+                    sourceVersionNo=asset.version_no,
+                    sourceTitle=asset.title,
+                )
+            )
+            if object_key:
+                known_marketing_keys.add(object_key)
+            known_marketing_urls.add(image_url)
+    return [*marketing_options, *knowledge_options]
 
 
 async def list_game_sessions(
@@ -500,8 +675,6 @@ async def cancel_my_session_join(
 
 async def add_session_player(store_id: uuid.UUID, session_id: uuid.UUID, payload: SessionPlayerRequest, db: AsyncSession) -> SessionPlayerResponse:
     session = await _get_session(store_id, session_id, db)
-    if await _joined_seats(session.id, db) + payload.seat_count > session.capacity:
-        raise GameSessionCapacityExceededError("当前场次人数已超过容量")
     if payload.user_id:
         user = await db.scalar(
             select(User)
@@ -517,6 +690,17 @@ async def add_session_player(store_id: uuid.UUID, session_id: uuid.UUID, payload
             payload.phone = payload.phone or user.phone
         else:
             raise SessionPlayerNotFoundError("该玩家不在当前门店客户池中")
+        existing = await db.scalar(
+            select(SessionPlayer.id).where(
+                SessionPlayer.session_id == session.id,
+                SessionPlayer.user_id == payload.user_id,
+                SessionPlayer.status != SessionPlayerStatus.CANCELLED,
+            )
+        )
+        if existing is not None:
+            raise ConflictError("该玩家已在当前车上，请直接调整其占位人数")
+    if await _joined_seats(session.id, db) + payload.seat_count > session.capacity:
+        raise GameSessionCapacityExceededError("当前场次人数已超过容量")
     player = SessionPlayer(session_id=session.id, reservation_code=await _unique_reservation_code(db), **payload.model_dump(by_alias=False))
     db.add(player)
     await db.flush()

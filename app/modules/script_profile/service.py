@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import uuid
 from datetime import UTC, datetime
 from typing import TypedDict
@@ -9,6 +10,7 @@ from typing import TypedDict
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.database import AsyncSessionLocal
 from app.core.exceptions import ApplicationError
 from app.integrations.llm.client import structured_chat_completion
 from app.modules.knowledge.actions.retrieve_chunks import KnowledgeRetriever
@@ -17,12 +19,15 @@ from app.modules.knowledge.models import KnowledgeDocument, KnowledgeResourceTyp
 from app.modules.knowledge.schemas import KnowledgeRetrieveRequest
 from app.modules.script_profile.models import ScriptProfile, ScriptProfileReviewStatus
 from app.modules.script_profile.prompts import (
+    SCRIPT_ACT_STRUCTURE_SYSTEM_PROMPT,
     SCRIPT_PROFILE_SYSTEM_PROMPT,
     SCRIPT_RELATIONSHIPS_SYSTEM_PROMPT,
+    build_act_structure_prompt,
     build_relationships_prompt,
     build_script_profile_prompt,
 )
 from app.modules.script_profile.schemas import (
+    ScriptActStructureResult,
     ScriptProfileDraft,
     ScriptProfileGenerateRequest,
     ScriptProfileResult,
@@ -83,10 +88,17 @@ PROFILE_RETRIEVAL_SCENES: list[ProfileRetrievalScene] = [
         "query": "物料清单 地图 线索 道具 BGM 表格 打印 准备",
         "top_k": 8,
     },
+    {
+        "key": "act_structure",
+        "title": "分幕与任务结构",
+        "query": "第一幕 第二幕 第三幕 阶段 阅读至此 请翻页 本幕任务 你们的任务 当前任务 进入下一幕 DM发放 转场",
+        "top_k": 20,
+    },
 ]
 
 MAX_CONTEXT_CHARS_PER_CHUNK = 900
 MAX_CONTEXT_CHARS_PER_SCENE = 6500
+logger = logging.getLogger(__name__)
 
 
 class ScriptProfileError(ApplicationError):
@@ -116,11 +128,13 @@ def _format_context(chunks: list[object]) -> tuple[str, list[str], list[str]]:
             getattr(chunk, "relative_path", None) or getattr(chunk, "relativePath", "")
         )
         title = str(getattr(chunk, "title", None) or "未命名片段")
+        act = str(getattr(chunk, "act", None) or "未识别幕次")
+        role_name = str(getattr(chunk, "role_name", None) or "未识别角色")
         content = str(getattr(chunk, "content", ""))
         if len(content) > MAX_CONTEXT_CHARS_PER_CHUNK:
             content = f"{content[:MAX_CONTEXT_CHARS_PER_CHUNK]}...\n[内容过长，已截断]"
         lines.append(
-            f"[{index}] chunk_id={chunk_id}\n来源：{relative_path} / {title}\n{content}"
+            f"[{index}] chunk_id={chunk_id}\n来源：{relative_path} / {title}\n角色：{role_name}\n幕：{act}\n{content}"
         )
         if chunk_id:
             chunk_ids.append(chunk_id)
@@ -198,6 +212,7 @@ def format_profile_contexts(
         "mechanics": "机制规则",
         "truth": "真相结局",
         "materials": "物料线索",
+        "act_structure": "分幕与任务结构",
     }
 
     lines: list[str] = ["# 多路召回结果"]
@@ -269,6 +284,32 @@ async def extract_script_relationships(
     )
 
 
+async def extract_script_act_structure(
+    *,
+    document: KnowledgeDocument,
+    contexts: dict[str, str],
+) -> ScriptActStructureResult:
+    """从多个角色本重复出现的阶段、任务和转场信息中抽取公共分幕结构。"""
+
+    return await structured_chat_completion(
+        ScriptActStructureResult,
+        [
+            {"role": "system", "content": SCRIPT_ACT_STRUCTURE_SYSTEM_PROMPT},
+            {
+                "role": "user",
+                "content": build_act_structure_prompt(
+                    document_name=document.name,
+                    act_context=contexts.get("act_structure", ""),
+                    dm_flow_context=contexts.get("dm_flow", ""),
+                    mechanics_context=contexts.get("mechanics", ""),
+                ),
+            },
+        ],
+        temperature=0.1,
+        max_tokens=2800,
+    )
+
+
 def _profile_to_result(profile: ScriptProfile) -> ScriptProfileResult:
     return ScriptProfileResult(
         id=profile.id,
@@ -302,6 +343,8 @@ def _profile_to_result(profile: ScriptProfile) -> ScriptProfileResult:
             if hasattr(profile.review_status, "value")
             else str(profile.review_status)
         ),
+        actStructure=profile.act_structure,
+        generationStatus=profile.generation_status,
         errorMessage=profile.error_message,
         approvedAt=profile.approved_at,
         createdAt=profile.created_at,
@@ -363,6 +406,14 @@ async def generate_script_profile(
         store_id=store_id,
         document=document,
     )
+    logger.info(
+        "script profile retrieval completed",
+        extra={
+            "document_id": str(document_id),
+            "version_id": str(document.active_version_id),
+            "diagnostics": diagnostics,
+        },
+    )
 
     context = format_profile_contexts(contexts, diagnostics)
     if not any(value.strip() for value in contexts.values()):
@@ -388,11 +439,23 @@ async def generate_script_profile(
         temperature=0.2,
         max_tokens=4000,
     )
+    logger.info(
+        "script profile draft generated",
+        extra={
+            "document_id": str(document_id),
+            "confidence_score": draft.confidence_score,
+            "role_count": len(draft.roles or []),
+        },
+    )
 
     relationship_result = await extract_script_relationships(
         document=document,
         contexts=contexts,
         draft=draft,
+    )
+    act_structure_result = await extract_script_act_structure(
+        document=document,
+        contexts=contexts,
     )
     existing = await db.scalar(
         select(ScriptProfile).where(
@@ -439,6 +502,10 @@ async def generate_script_profile(
         )
     )
     profile.relationships = relationships
+    profile.act_structure = [
+        item.model_dump(mode="json", by_alias=True)
+        for item in sorted(act_structure_result.acts, key=lambda item: item.order)
+    ]
     profile.material_checklist = _to_text_list(draft.material_checklist)
     profile.opening_risks = _to_text_list(draft.opening_risks)
     profile.spoiler_notes = _to_text_list(draft.spoiler_notes)
@@ -452,6 +519,7 @@ async def generate_script_profile(
     review_reasons = [
         *draft.needs_review_reasons,
         *relationship_result.needs_review_reasons,
+        *act_structure_result.needs_review_reasons,
     ]
     if missing_scene_titles:
         review_reasons.append(
@@ -463,10 +531,111 @@ async def generate_script_profile(
         if draft.confidence_score < 75 or review_reasons
         else ScriptProfileReviewStatus.DRAFT
     )
+    profile.generation_status = "ready"
     profile.error_message = "；".join(review_reasons) if review_reasons else None
     await db.flush()
     await db.refresh(profile)
     return _profile_to_result(profile)
+
+
+async def queue_script_profile_generation(
+    db: AsyncSession,
+    *,
+    store_id: uuid.UUID,
+    document_id: uuid.UUID,
+    user_id: uuid.UUID | None,
+) -> tuple[ScriptProfileResult, bool]:
+    """创建或复用档案生成任务，返回任务视图与是否需要启动任务。"""
+
+    document = await _get_script_document(
+        db, store_id=store_id, document_id=document_id
+    )
+    profile = await db.scalar(
+        select(ScriptProfile).where(
+            ScriptProfile.store_id == store_id,
+            ScriptProfile.document_id == document_id,
+            ScriptProfile.deleted_at.is_(None),
+        )
+    )
+    if profile is not None and profile.generation_status in {"queued", "generating"}:
+        return _profile_to_result(profile), False
+
+    if profile is None:
+        profile = ScriptProfile(
+            id=uuid.uuid4(),
+            store_id=store_id,
+            document_id=document_id,
+            version_id=document.active_version_id,
+            name=document.name,
+            created_by_user_id=user_id,
+            generation_status="queued",
+        )
+        db.add(profile)
+    else:
+        profile.version_id = document.active_version_id
+        profile.generation_status = "queued"
+        profile.error_message = None
+        profile.created_by_user_id = user_id
+    await db.flush()
+    await db.refresh(profile)
+    return _profile_to_result(profile), True
+
+
+async def run_script_profile_generation_background(
+    *,
+    document_id: uuid.UUID,
+    store_id: uuid.UUID,
+    user_id: uuid.UUID | None,
+    payload: ScriptProfileGenerateRequest,
+) -> None:
+    """在独立会话内运行耗时检索与模型调用，不占用浏览器请求连接。"""
+
+    try:
+        async with AsyncSessionLocal() as db:
+            profile = await db.scalar(
+                select(ScriptProfile).where(
+                    ScriptProfile.store_id == store_id,
+                    ScriptProfile.document_id == document_id,
+                    ScriptProfile.deleted_at.is_(None),
+                )
+            )
+            if profile is None or profile.generation_status != "queued":
+                return
+            profile.generation_status = "generating"
+            await db.commit()
+            logger.info(
+                "script profile generation started in background",
+                extra={"document_id": str(document_id), "profile_id": str(profile.id)},
+            )
+            await generate_script_profile(
+                db,
+                store_id=store_id,
+                document_id=document_id,
+                user_id=user_id,
+                payload=payload,
+            )
+            await db.commit()
+            logger.info(
+                "script profile generation completed in background",
+                extra={"document_id": str(document_id), "profile_id": str(profile.id)},
+            )
+    except Exception as error:  # noqa: BLE001 - 必须写回失败状态供页面刷新查看。
+        logger.exception(
+            "script profile generation failed in background",
+            extra={"document_id": str(document_id)},
+        )
+        async with AsyncSessionLocal() as db:
+            profile = await db.scalar(
+                select(ScriptProfile).where(
+                    ScriptProfile.store_id == store_id,
+                    ScriptProfile.document_id == document_id,
+                    ScriptProfile.deleted_at.is_(None),
+                )
+            )
+            if profile is not None:
+                profile.generation_status = "failed"
+                profile.error_message = str(error)[:2000]
+                await db.commit()
 
 
 async def update_script_profile(

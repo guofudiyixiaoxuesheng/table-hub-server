@@ -190,3 +190,36 @@ class ScriptMarketingAsset(Base):
         server_default=func.now(),
         onupdate=func.now(),
     )
+
+
+class ScriptMarketingImage(Base):
+    """归属于剧本、可跨运营物料版本复用的生图素材。"""
+
+    __tablename__ = "script_marketing_images"
+    __table_args__ = (
+        Index("ix_script_marketing_images_store_document", "store_id", "document_id", "created_at"),
+        Index("ix_script_marketing_images_source_asset", "source_asset_id", "created_at"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    store_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("stores.id", ondelete="CASCADE"), nullable=False
+    )
+    document_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("knowledge_documents.id", ondelete="CASCADE"), nullable=False
+    )
+    source_asset_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("script_marketing_assets.id", ondelete="SET NULL"), nullable=True
+    )
+    generation_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    image_kind: Mapped[str] = mapped_column(String(20), nullable=False, default="cover", server_default="cover")
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="generating", server_default="generating")
+    object_key: Mapped[str | None] = mapped_column(String(1024), nullable=True)
+    image_url: Mapped[str | None] = mapped_column(String(2048), nullable=True)
+    final_prompt: Mapped[str | None] = mapped_column(Text, nullable=True)
+    style_profile_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("script_art_reference_style_profiles.id", ondelete="SET NULL"), nullable=True
+    )
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now())

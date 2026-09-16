@@ -141,8 +141,15 @@ class ScriptGenreOption(Base):
 
     __tablename__ = "script_genre_options"
     __table_args__ = (
-        UniqueConstraint("store_id", "value", name="uq_script_genre_options_store_value"),
-        Index("ix_script_genre_options_store_active_sort", "store_id", "is_active", "sort_order"),
+        UniqueConstraint(
+            "store_id", "value", name="uq_script_genre_options_store_value"
+        ),
+        Index(
+            "ix_script_genre_options_store_active_sort",
+            "store_id",
+            "is_active",
+            "sort_order",
+        ),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
@@ -150,8 +157,12 @@ class ScriptGenreOption(Base):
     value: Mapped[str] = mapped_column(String(80), nullable=False)
     label: Mapped[str] = mapped_column(String(80), nullable=False)
     description: Mapped[str | None] = mapped_column(String(500), nullable=True)
-    sort_order: Mapped[int] = mapped_column(Integer, nullable=False, default=100, server_default="100")
-    is_active: Mapped[bool] = mapped_column(nullable=False, default=True, server_default="true")
+    sort_order: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=100, server_default="100"
+    )
+    is_active: Mapped[bool] = mapped_column(
+        nullable=False, default=True, server_default="true"
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
@@ -165,7 +176,9 @@ class ScriptGenreOption(Base):
 
 class KnowledgeDocument(Base):
     __tablename__ = "knowledge_documents"
-    __table_args__ = (Index("ix_knowledge_documents_store_status", "store_id", "status"),)
+    __table_args__ = (
+        Index("ix_knowledge_documents_store_status", "store_id", "status"),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
     store_id: Mapped[uuid.UUID] = mapped_column(nullable=False, index=True)
@@ -254,6 +267,13 @@ class KnowledgeVersion(Base):
     manifest_key: Mapped[str] = mapped_column(String(1024), nullable=False)
     file_count: Mapped[int] = mapped_column(nullable=False)
     total_size: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    preparation_stages: Mapped[dict[str, object]] = mapped_column(
+        JSONB,
+        nullable=False,
+        default=dict,
+        server_default="{}",
+        comment="AI 整理各阶段的持久化状态：解析、切块、向量化",
+    )
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
@@ -362,7 +382,9 @@ class KnowledgeParsedFile(Base):
     markdown_key: Mapped[str | None] = mapped_column(String(1024), nullable=True)
     metadata_key: Mapped[str | None] = mapped_column(String(1024), nullable=True)
     text_sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
-    char_count: Mapped[int] = mapped_column(nullable=False, default=0, server_default="0")
+    char_count: Mapped[int] = mapped_column(
+        nullable=False, default=0, server_default="0"
+    )
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
@@ -500,7 +522,9 @@ class KnowledgeChunk(Base):
     role_name: Mapped[str | None] = mapped_column(String(120), nullable=True)
     content: Mapped[str] = mapped_column(Text, nullable=False)
     content_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
-    char_count: Mapped[int] = mapped_column(nullable=False, default=0, server_default="0")
+    char_count: Mapped[int] = mapped_column(
+        nullable=False, default=0, server_default="0"
+    )
     extra_metadata: Mapped[dict[str, object]] = mapped_column(
         "metadata", JSONB, nullable=False, default=dict, server_default="{}"
     )
@@ -608,6 +632,4 @@ class KnowledgeUploadSession(Base):
         DateTime(timezone=True), nullable=True
     )
 
-    version: Mapped[KnowledgeVersion] = relationship(
-        back_populates="upload_sessions"
-    )
+    version: Mapped[KnowledgeVersion] = relationship(back_populates="upload_sessions")

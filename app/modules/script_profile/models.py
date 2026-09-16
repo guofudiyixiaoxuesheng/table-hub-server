@@ -106,6 +106,13 @@ class ScriptProfile(Base):
         server_default="[]",
         comment="人物关系边，例如 A 与 B 的亲属、恋人、敌对、阵营、秘密等关系",
     )
+    act_structure: Mapped[list[dict[str, object]]] = mapped_column(
+        JSONB,
+        nullable=False,
+        default=list,
+        server_default="[]",
+        comment="跨角色本归并出的分幕结构、公共任务、转场条件与证据来源",
+    )
     material_checklist: Mapped[list[str]] = mapped_column(
         JSONB,
         nullable=False,
@@ -159,6 +166,13 @@ class ScriptProfile(Base):
         default=ScriptProfileReviewStatus.DRAFT,
         server_default=ScriptProfileReviewStatus.DRAFT.value,
         comment="确认状态：draft=AI草稿，needs_review=需确认，approved=已确认，failed=失败",
+    )
+    generation_status: Mapped[str] = mapped_column(
+        String(24),
+        nullable=False,
+        default="ready",
+        server_default="ready",
+        comment="后台生成状态：queued=已排队，generating=生成中，ready=完成，failed=失败",
     )
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True, comment="生成失败原因")
     created_by_user_id: Mapped[uuid.UUID | None] = mapped_column(

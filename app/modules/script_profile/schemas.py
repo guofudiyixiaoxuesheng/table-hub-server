@@ -37,6 +37,7 @@ class ScriptProfileUpdateRequest(BaseModel):
     core_mechanics: list[str] | None = Field(default=None, alias="coreMechanics")
     roles: list[dict[str, object]] | None = None
     relationships: list[dict[str, object]] | None = None
+    act_structure: list[dict[str, object]] | None = Field(default=None, alias="actStructure")
     material_checklist: list[str] | None = Field(
         default=None, alias="materialChecklist"
     )
@@ -93,6 +94,7 @@ class ScriptProfileResult(BaseModel):
     core_mechanics: list[str] = Field(alias="coreMechanics")
     roles: list[dict[str, object]]
     relationships: list[dict[str, object]]
+    act_structure: list[dict[str, object]] = Field(alias="actStructure")
     material_checklist: list[str] = Field(alias="materialChecklist")
     opening_risks: list[str] = Field(alias="openingRisks")
     spoiler_notes: list[str] = Field(alias="spoilerNotes")
@@ -101,6 +103,7 @@ class ScriptProfileResult(BaseModel):
     retrieval_diagnostics: list[dict[str, object]] = Field(alias="retrievalDiagnostics")
     confidence_score: int | None = Field(alias="confidenceScore")
     review_status: str = Field(alias="reviewStatus")
+    generation_status: str = Field(alias="generationStatus")
     error_message: str | None = Field(alias="errorMessage")
     approved_at: datetime | None = Field(alias="approvedAt")
     created_at: datetime = Field(alias="createdAt")
@@ -135,6 +138,33 @@ class ScriptRelationshipsResult(BaseModel):
     """LLM 单独抽取的人物关系结果。"""
 
     relationships: list[ScriptRelationship] = Field(default_factory=list)
+    needs_review_reasons: list[str] = Field(
+        default_factory=list, alias="needsReviewReasons"
+    )
+
+    model_config = ConfigDict(populate_by_name=True, validate_by_name=True)
+
+
+class ScriptActStructureItem(BaseModel):
+    """跨角色剧本资料归并出的一个公共幕次。"""
+
+    order: int = Field(ge=1)
+    act: str
+    summary: str = ""
+    shared_objective: str | None = Field(default=None, alias="sharedObjective")
+    player_tasks: list[str] = Field(default_factory=list, alias="playerTasks")
+    transition_trigger: str | None = Field(default=None, alias="transitionTrigger")
+    role_coverage_matched: int = Field(default=0, alias="roleCoverageMatched", ge=0)
+    role_coverage_total: int = Field(default=0, alias="roleCoverageTotal", ge=0)
+    sources: list[str] = Field(default_factory=list)
+    confidence: int = Field(default=60, ge=0, le=100)
+    needs_review: bool = Field(default=False, alias="needsReview")
+
+    model_config = ConfigDict(populate_by_name=True, validate_by_name=True)
+
+
+class ScriptActStructureResult(BaseModel):
+    acts: list[ScriptActStructureItem] = Field(default_factory=list)
     needs_review_reasons: list[str] = Field(
         default_factory=list, alias="needsReviewReasons"
     )
