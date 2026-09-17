@@ -8,9 +8,17 @@ from collections import Counter, defaultdict
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.modules.game_session.models import GameSession, GameSessionStatus, SessionPlayer, SessionPlayerStatus
+from app.modules.game_session.models import (
+    GameSession,
+    GameSessionStatus,
+    SessionPlayer,
+    SessionPlayerStatus,
+)
 from app.modules.knowledge.models import KnowledgeDocument
-from app.modules.user.actions.manage_store_players import StorePlayerNotFoundError, _to_store_player_response
+from app.modules.user.actions.manage_store_players import (
+    StorePlayerNotFoundError,
+    _to_store_player_response,
+)
 from app.modules.user.models import StorePlayer, User, UserRole, UserStatus
 from app.modules.user.schemas import (
     PlayerBehaviorSummaryResponse,
@@ -151,7 +159,24 @@ async def get_current_player_behavior_summary(
         )
     )
     if store_player_id is None:
-        raise StorePlayerNotFoundError("当前账号还没有拼车记录")
+        # 兼容历史报名：旧版本可能已写入 SessionPlayer，但尚未建立客户池关联。
+        # 只在确有报名记录时修复关联，避免访问“我的拼车”的新用户被无意义加入客户池。
+        has_reservation = await db.scalar(
+            select(SessionPlayer.id)
+            .join(GameSession, GameSession.id == SessionPlayer.session_id)
+            .where(
+                GameSession.store_id == store_id,
+                GameSession.deleted_at.is_(None),
+                SessionPlayer.user_id == user_id,
+            )
+            .limit(1)
+        )
+        if has_reservation is None:
+            raise StorePlayerNotFoundError("当前账号还没有拼车记录")
+        store_player = StorePlayer(store_id=store_id, user_id=user_id)
+        db.add(store_player)
+        await db.flush()
+        store_player_id = store_player.id
     return await get_player_behavior_summary(store_id, store_player_id, db)
 
 

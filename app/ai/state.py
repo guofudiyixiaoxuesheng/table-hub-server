@@ -40,3 +40,4 @@ class ParentGraphState(TypedDict, total=False):
     citations: list[dict[str, object]]
     next_action: str
     scene_payload: dict[str, object]
+    runtime_context: dict[str, object]

@@ -141,6 +141,7 @@ async def upsert_session_message_pair(
     user_message: str,
     assistant_message: str,
     scene: str,
+    assistant_metadata: dict[str, object] | None = None,
     db: AsyncSession,
 ) -> ChatSession:
     session = await ensure_visible_session(
@@ -167,7 +168,7 @@ async def upsert_session_message_pair(
                 role=ChatMessageRole.ASSISTANT,
                 message_type=ChatMessageType.TEXT,
                 content=assistant_message,
-                message_metadata={"scene": scene},
+                message_metadata=assistant_metadata or {"scene": scene},
             ),
         ]
     )

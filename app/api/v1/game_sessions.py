@@ -8,35 +8,42 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.common.responses import success_response
 from app.core.database import get_database
-from app.core.security import CurrentAccess, StoreAccessContext, StoreManagerAccess, get_optional_access
+from app.core.security import (
+    CurrentAccess,
+    StoreAccessContext,
+    StoreManagerAccess,
+    get_optional_access,
+)
 from app.core.store_context import resolve_request_store_id
+from app.modules.game_session.models import GameSessionStatus
 from app.modules.game_session.schemas import (
     CreateGameSessionRequest,
     CreateRoomRequest,
+    JoinGameSessionRequest,
     SessionPlayerRequest,
-    UpdateRoomRequest,
     UpdateGameSessionRequest,
+    UpdateRoomRequest,
     UpdateSessionPlayerRequest,
 )
-from app.modules.game_session.models import GameSessionStatus
 from app.modules.game_session.service import (
     add_session_player,
     cancel_game_session,
     cancel_my_session_join,
-    create_room,
     create_game_session,
-    delete_room,
+    create_room,
     delete_game_session,
+    delete_room,
     delete_session_player,
     get_game_session_detail,
     join_game_session,
     list_dm_options,
     list_game_sessions,
+    list_my_game_sessions,
     list_rooms,
     list_script_image_assets,
     list_script_options,
-    update_room,
     update_game_session,
+    update_room,
     update_session_player,
 )
 
@@ -174,6 +181,15 @@ async def create_session_route(
     return success_response(message="场次创建成功", data=data.model_dump(mode="json", by_alias=True))
 
 
+@router.get("/mine")
+async def my_sessions_route(
+    access: CurrentAccess,
+    db: AsyncSession = Depends(get_database),
+):
+    data = await list_my_game_sessions(access.user_id, db)
+    return success_response(data=[item.model_dump(mode="json", by_alias=True) for item in data])
+
+
 @router.get("/{session_id}")
 async def get_session_route(
     session_id: uuid.UUID,
@@ -234,11 +250,18 @@ async def join_session_route(
     access: CurrentAccess,
     store_id: uuid.UUID | None = Query(default=None, alias="storeId"),
     db: AsyncSession = Depends(get_database),
+    payload: JoinGameSessionRequest | None = None,
 ):
     resolved_store_id = await _resolve_store_id(db, access, store_id)
     if not resolved_store_id:
         return success_response(data=None)
-    data = await join_game_session(resolved_store_id, session_id, access.user_id, db)
+    data = await join_game_session(
+        resolved_store_id,
+        session_id,
+        access.user_id,
+        db,
+        seat_count=(payload or JoinGameSessionRequest()).seat_count,
+    )
     payload = data.model_dump(mode="json", by_alias=True)
     payload.pop("notes", None)
     payload.pop("players", None)

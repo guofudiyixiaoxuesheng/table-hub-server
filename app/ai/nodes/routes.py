@@ -10,7 +10,6 @@ RouteName = Literal[
     "carpool",
     "script_rag",
     "reservation",
-    "store_faq",
     "casual_chat",
     "fallback",
 ]
@@ -20,12 +19,8 @@ def route_scene(state: ParentGraphState) -> RouteName:
     """根据意图识别结果选择后续业务分支。"""
 
     scene = state.get("scene", "fallback")
-    if scene in {
-        "carpool",
-        "script_rag",
-        "reservation",
-        "store_faq",
-        "casual_chat",
-    }:
+    if scene in {"carpool", "script_rag", "reservation", "casual_chat"}:
         return scene
+    if scene == "store_faq":
+        return "reservation"
     return "fallback"

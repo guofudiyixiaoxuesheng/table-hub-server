@@ -7,6 +7,7 @@ import string
 import uuid
 from datetime import UTC, date, datetime, time, timedelta
 from urllib.parse import unquote, urlparse
+from zoneinfo import ZoneInfo
 
 from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -76,6 +77,15 @@ class RoomNotFoundError(ApplicationError):
 
 def _reservation_code() -> str:
     return "".join(random.choices(string.digits, k=6))
+
+
+def _local_day_utc_range(target_day: date) -> tuple[datetime, datetime]:
+    """返回门店自然日对应的 UTC 区间，供 timestamptz 场次筛选使用。"""
+
+    business_timezone = ZoneInfo(settings.AI_DEFAULT_TIMEZONE)
+    local_start = datetime.combine(target_day, time.min, tzinfo=business_timezone)
+    local_end = local_start + timedelta(days=1)
+    return local_start.astimezone(UTC), local_end.astimezone(UTC)
 
 
 async def _unique_reservation_code(db: AsyncSession) -> str:
@@ -539,8 +549,7 @@ async def list_game_sessions(
         .order_by(GameSession.start_time.asc())
     )
     if day:
-        start_at = datetime.combine(day, time.min).replace(tzinfo=UTC)
-        end_at = start_at + timedelta(days=1)
+        start_at, end_at = _local_day_utc_range(day)
         statement = statement.where(GameSession.start_time >= start_at, GameSession.start_time < end_at)
     if status:
         statement = statement.where(GameSession.status == status)
@@ -553,6 +562,26 @@ async def list_game_sessions(
         statement = statement.where(or_(GameSession.title.ilike(like), GameSession.script_name.ilike(like)))
     sessions = (await db.scalars(statement)).all()
     return [await _to_session_response(session, db) for session in sessions]
+
+
+async def list_my_game_sessions(
+    user_id: uuid.UUID,
+    db: AsyncSession,
+) -> list[GameSessionResponse]:
+    """查询当前用户的全部正式报名，不依赖门店客户池关联。"""
+
+    statement = (
+        select(GameSession)
+        .join(SessionPlayer, SessionPlayer.session_id == GameSession.id)
+        .options(selectinload(GameSession.room))
+        .where(
+            GameSession.deleted_at.is_(None),
+            SessionPlayer.user_id == user_id,
+        )
+        .order_by(GameSession.start_time.desc())
+    )
+    sessions = (await db.scalars(statement)).unique().all()
+    return [await _to_session_response(session, db, current_user_id=user_id) for session in sessions]
 
 
 async def create_game_session(store_id: uuid.UUID, payload: CreateGameSessionRequest, db: AsyncSession) -> GameSessionDetailResponse:
@@ -620,14 +649,35 @@ async def join_game_session(
     session_id: uuid.UUID,
     user_id: uuid.UUID,
     db: AsyncSession,
+    *,
+    seat_count: int = 1,
 ) -> GameSessionDetailResponse:
     session = await _get_session(store_id, session_id, db)
     if session.status != GameSessionStatus.RECRUITING:
         raise ConflictError("当前场次暂不可预约")
+    store_player = await db.scalar(
+        select(StorePlayer).where(
+            StorePlayer.store_id == store_id,
+            StorePlayer.user_id == user_id,
+        )
+    )
+    if store_player is None:
+        # 所有玩家端入口（AI、移动端场次详情等）统一在上车时进入客户池。
+        db.add(StorePlayer(store_id=store_id, user_id=user_id))
+    elif store_player.deleted_at is not None:
+        store_player.deleted_at = None
+        store_player.updated_at = datetime.now(UTC)
+
     existing = await _my_reservation(session.id, user_id, db)
     if existing and existing.status != SessionPlayerStatus.CANCELLED:
+        current = await _joined_seats(session.id, db) - existing.seat_count
+        if current + seat_count > session.capacity:
+            raise GameSessionCapacityExceededError("当前场次人数已满")
+        existing.seat_count = seat_count
+        existing.updated_at = datetime.now(UTC)
+        await db.flush()
         return await get_game_session_detail(store_id, session.id, db, current_user_id=user_id)
-    if await _joined_seats(session.id, db) + 1 > session.capacity:
+    if await _joined_seats(session.id, db) + seat_count > session.capacity:
         raise GameSessionCapacityExceededError("当前场次人数已满")
 
     user = await db.get(User, user_id)
@@ -635,7 +685,7 @@ async def join_game_session(
     phone = user.phone if user else None
     if existing and existing.status == SessionPlayerStatus.CANCELLED:
         existing.status = SessionPlayerStatus.CONFIRMED
-        existing.seat_count = 1
+        existing.seat_count = seat_count
         existing.source = SessionJoinSource.H5
         existing.player_name = player_name
         existing.phone = phone
@@ -647,7 +697,7 @@ async def join_game_session(
                 user_id=user_id,
                 player_name=player_name,
                 phone=phone,
-                seat_count=1,
+                seat_count=seat_count,
                 source=SessionJoinSource.H5,
                 status=SessionPlayerStatus.CONFIRMED,
                 reservation_code=await _unique_reservation_code(db),

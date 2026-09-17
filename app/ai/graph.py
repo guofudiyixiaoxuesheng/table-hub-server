@@ -3,7 +3,7 @@
 设计原则：
 1. 前端 AI 对话只打这个父图入口。
 2. 父图只做场景识别、公共预处理和分流。
-3. DM 开本、预约、客服 RAG 后续作为子图挂载，避免业务堆在一个函数里。
+3. DM 开本、预约和咨询能力按需挂载，避免业务堆在一个函数里。
 """
 
 from __future__ import annotations
@@ -21,7 +21,6 @@ from app.ai.nodes.handlers import (
     fallback_handler,
     reservation_handler,
     script_rag_handler,
-    store_faq_handler,
 )
 from app.ai.nodes.rewrite import rewrite_query
 from app.ai.nodes.routes import route_scene
@@ -35,7 +34,6 @@ def build_parent_graph(checkpointer: BaseCheckpointSaver | None = None):
     graph.add_node("carpool_handler", carpool_handler)
     graph.add_node("script_rag_handler", script_rag_handler)
     graph.add_node("reservation_handler", reservation_handler)
-    graph.add_node("store_faq_handler", store_faq_handler)
     graph.add_node("casual_chat_handler", casual_chat_handler)
     graph.add_node("fallback_handler", fallback_handler)
 
@@ -48,7 +46,7 @@ def build_parent_graph(checkpointer: BaseCheckpointSaver | None = None):
             "carpool": "carpool_handler",
             "script_rag": "script_rag_handler",
             "reservation": "reservation_handler",
-            "store_faq": "store_faq_handler",
+            "store_faq": "reservation_handler",
             "casual_chat": "casual_chat_handler",
             "fallback": "fallback_handler",
         },
@@ -56,7 +54,6 @@ def build_parent_graph(checkpointer: BaseCheckpointSaver | None = None):
     graph.add_edge("carpool_handler", END)
     graph.add_edge("script_rag_handler", END)
     graph.add_edge("reservation_handler", END)
-    graph.add_edge("store_faq_handler", END)
     graph.add_edge("casual_chat_handler", END)
     graph.add_edge("fallback_handler", END)
     return graph.compile(checkpointer=checkpointer)

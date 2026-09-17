@@ -109,6 +109,14 @@ class UpdateGameSessionRequest(GameSessionBase):
     status: GameSessionStatus = GameSessionStatus.RECRUITING
 
 
+class JoinGameSessionRequest(BaseModel):
+    """玩家主动上车时可确认的占位人数。"""
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    seat_count: int = Field(default=1, alias="seatCount", ge=1, le=10)
+
+
 class SessionPlayerRequest(BaseModel):
     model_config = ConfigDict(populate_by_name=True, str_strip_whitespace=True)
 

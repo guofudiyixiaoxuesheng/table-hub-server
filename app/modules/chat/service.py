@@ -10,8 +10,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.ai.graph import run_parent_graph, stream_parent_graph
 from app.ai.state import AiMessage
+from app.ai.tools.runtime_context import build_time_context
 from app.core.security import StoreAccessContext
 from app.core.store_context import resolve_request_store_id
+from app.modules.analytics.service import maybe_create_rag_evaluation_from_state
 from app.modules.chat.exceptions import ChatSessionNotFoundError
 from app.modules.chat.repository import (
     ensure_visible_session,
@@ -28,7 +30,6 @@ from app.modules.chat.schemas import (
     ChatSessionMessages,
     ChatSessionSummary,
 )
-from app.modules.analytics.service import maybe_create_rag_evaluation_from_state
 from app.observability.langfuse import langfuse_callbacks
 from app.observability.tracing import trace_chat
 
@@ -44,14 +45,12 @@ async def _owner(
     guest_id: str | None,
     requested_store_id: uuid.UUID | None = None,
 ) -> tuple[uuid.UUID | None, uuid.UUID | None, str | None]:
-    if access:
-        return access.user_id, access.store_id, None
     store_id = await resolve_request_store_id(
         db=db,
         access=access,
         requested_store_id=requested_store_id,
     )
-    return None, store_id, guest_id
+    return access.user_id if access else None, store_id, None if access else guest_id
 
 
 async def _build_graph_state(
@@ -88,6 +87,9 @@ async def _build_graph_state(
         "role": access.role if access else None,
         "message": payload.message,
         "messages": messages,
+        "runtime_context": {
+            "time": build_time_context(),
+        },
     }
 
 
@@ -103,6 +105,7 @@ def _response_from_state(thread_id: str, state: dict[str, Any]) -> ChatResponse:
         answer=state.get("answer", "暂时无法回答，请稍后再试。"),
         nextAction=state.get("next_action", ""),
         citations=state.get("citations", []),
+        scenePayload=state.get("scene_payload", {}),
     )
 
 
@@ -207,6 +210,7 @@ async def chat_with_parent_graph(
         user_message=payload.message,
         assistant_message=response.answer,
         scene=response.scene,
+        assistant_metadata={"scene": response.scene, "scenePayload": response.scene_payload},
         db=db,
     )
     await maybe_create_rag_evaluation_from_state(
@@ -285,6 +289,7 @@ async def stream_chat_with_parent_graph(
         user_message=payload.message,
         assistant_message=response.answer,
         scene=response.scene,
+        assistant_metadata={"scene": response.scene, "scenePayload": response.scene_payload},
         db=db,
     )
     await maybe_create_rag_evaluation_from_state(

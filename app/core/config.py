@@ -135,7 +135,12 @@ class Settings(BaseSettings):
     # 其他配置
     REDIS_URL: str = "redis://localhost:6379"
 
+    # AI 基础上下文 / 外部事实检索
+    AI_DEFAULT_TIMEZONE: str = "Asia/Shanghai"
     TAVILY_API_KEY: str | None = None
+    TAVILY_BASE_URL: str = "https://api.tavily.com"
+    TAVILY_TIMEOUT_SECONDS: float = 15.0
+    TAVILY_MAX_RESULTS: int = 5
     # MINERU_TOKEN
     MINERU_TOKEN: str | None = None
     MINERU_BASE_URL: str = "https://mineru.net"

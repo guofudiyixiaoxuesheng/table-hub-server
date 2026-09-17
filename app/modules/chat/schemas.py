@@ -39,6 +39,7 @@ class ChatResponse(BaseModel):
     answer: str
     next_action: str = Field(alias="nextAction")
     citations: list[dict[str, object]] = Field(default_factory=list)
+    scene_payload: dict[str, object] = Field(default_factory=dict, alias="scenePayload")
 
 
 class ChatSessionSummary(BaseModel):

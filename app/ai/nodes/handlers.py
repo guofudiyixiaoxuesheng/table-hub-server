@@ -16,9 +16,13 @@ from langchain_core.runnables import RunnableConfig
 from langgraph.config import get_stream_writer
 from openai import LengthFinishReasonError, OpenAIError
 
+from app.ai.scenes.reservation.service import answer_reservation_consultation
 from app.ai.scenes.script_rag import build_script_rag_graph
 from app.ai.state import AiMessage, ParentGraphState
-from app.integrations.llm.client import ChatModelNotConfiguredError, stream_chat_completion
+from app.integrations.llm.client import (
+    ChatModelNotConfiguredError,
+    stream_chat_completion,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -42,12 +46,13 @@ def _build_answer(
     return {**state, "answer": answer, "next_action": next_action}
 
 
-def carpool_handler(state: ParentGraphState) -> ParentGraphState:
-    return _build_answer(
-        state,
-        title="拼车助手",
-        next_action="后续接拼车子图：按人数、时间、剧本偏好匹配可拼场次。",
-    )
+async def carpool_handler(
+    state: ParentGraphState,
+    config: RunnableConfig | None = None,
+) -> ParentGraphState:
+    """拼车助手以真实招募场次为数据源，不返回静态话术。"""
+
+    return await answer_reservation_consultation(state, config, scene_type="carpool")
 
 
 async def script_rag_handler(
@@ -77,20 +82,11 @@ async def script_rag_handler(
     }
 
 
-def reservation_handler(state: ParentGraphState) -> ParentGraphState:
-    return _build_answer(
-        state,
-        title="预约咨询",
-        next_action="后续接预约子图：场次查询、人数判断、预约码生成。",
-    )
-
-
-def store_faq_handler(state: ParentGraphState) -> ParentGraphState:
-    return _build_answer(
-        state,
-        title="门店客服",
-        next_action="后续接客服 RAG：知识库召回、精排、引用回答。",
-    )
+async def reservation_handler(
+    state: ParentGraphState,
+    config: RunnableConfig | None = None,
+) -> ParentGraphState:
+    return await answer_reservation_consultation(state, config)
 
 
 def _recent_chat_messages(state: ParentGraphState, limit: int = 10) -> list[AiMessage]:
@@ -107,7 +103,11 @@ def _casual_chat_fallback(state: ParentGraphState) -> ParentGraphState:
         f"收到，{query or '我在听'}。\n"
         "我可以先陪你聊聊；如果你后面想问拼车、剧本、预约或者门店规则，也可以直接说。"
     )
-    return {**state, "answer": answer, "next_action": "引导用户进入拼车、剧本 RAG、预约或门店咨询。"}
+    return {
+        **state,
+        "answer": answer,
+        "next_action": "引导用户进入拼车、剧本 RAG、预约或门店咨询。",
+    }
 
 
 def _write_answer_delta(delta: str) -> None:
