@@ -27,6 +27,9 @@ class Settings(BaseSettings):
     AUTH_COOKIE_SECURE: bool = False
     AUTH_COOKIE_SAMESITE: str = "lax"
     AUTH_COOKIE_DOMAIN: str | None = None
+    # 公开演示入口。邀请码只配置在部署环境，不要提交到仓库；留空则关闭。
+    PUBLIC_DEMO_INVITE_CODE: str | None = None
+    PUBLIC_DEMO_ACCOUNT_PHONE: str | None = None
     CORS_ORIGINS: str = (
         "http://localhost:3000,http://localhost:3001,"
         "http://127.0.0.1:3000,http://127.0.0.1:3001,"

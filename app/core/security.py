@@ -5,8 +5,12 @@ from dataclasses import dataclass
 from typing import Annotated
 
 import jwt
-from fastapi import Depends
-from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer, OAuth2PasswordBearer
+from fastapi import Depends, Request
+from fastapi.security import (
+    HTTPAuthorizationCredentials,
+    HTTPBearer,
+    OAuth2PasswordBearer,
+)
 
 from app.core.config import settings
 from app.core.exceptions import ApplicationError
@@ -45,6 +49,7 @@ class StoreManagerContext:
 
 
 def require_authenticated_user(
+    request: Request,
     token: Annotated[str, Depends(oauth2_scheme)],
 ) -> StoreAccessContext:
     """验证短期 Access Token 并返回可信门店身份。"""
@@ -69,10 +74,15 @@ def require_authenticated_user(
         )
     except (jwt.PyJWTError, ValueError, KeyError, TypeError) as error:
         raise AuthenticationError("登录凭证无效或已过期") from error
+    # DM 可参与当前门店的日常操作，但不得删除资源。这里在后端统一
+    # 拦截，避免仅隐藏前端按钮后仍可直接调用删除 API。
+    if context.role == "dm" and request.method == "DELETE":
+        raise PermissionDeniedError("DM 账号不允许删除资源")
     return context
 
 
 def get_optional_access(
+    request: Request,
     credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(optional_bearer_scheme)],
 ) -> StoreAccessContext | None:
     """可选登录身份。
@@ -84,7 +94,7 @@ def get_optional_access(
     if credentials is None:
         return None
     try:
-        return require_authenticated_user(credentials.credentials)
+        return require_authenticated_user(request, credentials.credentials)
     except AuthenticationError:
         return None
 
@@ -94,8 +104,8 @@ def require_store_manager(
 ) -> StoreManagerContext:
     """仅允许平台管理员或门店店长执行写操作。"""
 
-    if context.role not in {"admin", "manager"} or context.store_id is None:
-        raise PermissionDeniedError("仅管理员或店长可以执行此操作")
+    if context.role not in {"admin", "manager", "dm"} or context.store_id is None:
+        raise PermissionDeniedError("仅管理员、店长或 DM 可以执行此操作")
     return StoreManagerContext(
         user_id=context.user_id,
         store_id=context.store_id,

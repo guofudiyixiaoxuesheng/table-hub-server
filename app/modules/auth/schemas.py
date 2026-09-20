@@ -107,3 +107,29 @@ class DmInviteResponse(BaseModel):
 
     code: str
     expires_at: datetime = Field(alias="expiresAt")
+
+
+class StoreMemberResponse(BaseModel):
+    """门店员工/DM 的安全展示字段。"""
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    id: uuid.UUID
+    user_id: uuid.UUID = Field(alias="userId")
+    nickname: str | None
+    phone: str
+    role: str
+    status: str
+    created_at: datetime = Field(alias="createdAt")
+
+
+class AssignDmRequest(SmsCodeRequest):
+    """将已注册账户关联到当前门店并授予 DM 角色。"""
+
+
+class PublicDemoLoginRequest(BaseModel):
+    """公开演示入口提交的邀请码。"""
+
+    model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
+
+    code: str = Field(min_length=16, max_length=128)

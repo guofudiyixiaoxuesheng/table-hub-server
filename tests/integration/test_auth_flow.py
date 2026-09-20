@@ -12,10 +12,13 @@ from app.core.security import AuthenticationError
 from app.modules.auth.models import Store, StoreMember
 from app.modules.auth.schemas import RegistrationType
 from app.modules.auth.service import (
+    assign_existing_user_as_dm,
     change_password,
     create_dm_invite,
     hash_password,
+    list_store_members,
     login,
+    login_with_public_demo_code,
     logout,
     refresh,
     register,
@@ -172,6 +175,16 @@ async def test_user_and_invited_dm_registration(monkeypatch) -> None:
             )
             assert dm.response.user.role == "dm"
             assert dm.response.user.store_id == manager.response.user.store_id
+            monkeypatch.setattr(settings, "PUBLIC_DEMO_INVITE_CODE", "demo-invite-code-123456")
+            monkeypatch.setattr(settings, "PUBLIC_DEMO_ACCOUNT_PHONE", dm.response.user.phone)
+            demo_session = await login_with_public_demo_code("demo-invite-code-123456", db)
+            assert demo_session.response.user.id == dm.response.user.id
+            assert demo_session.response.user.role == "dm"
+            members = await list_store_members(manager.response.user.store_id, db)
+            assert [(member.nickname, member.role) for member in members] == [
+                ("邀请店长", "manager"),
+                ("测试 DM", "dm"),
+            ]
             with pytest.raises(ConflictError):
                 await register(
                     f"134{suffix:08d}",
@@ -182,6 +195,21 @@ async def test_user_and_invited_dm_registration(monkeypatch) -> None:
                     invite.code,
                     db,
                 )
+
+            promoted = await assign_existing_user_as_dm(
+                player.response.user.phone,
+                manager.response.user.store_id,
+                db,
+            )
+            assert promoted.nickname == "普通玩家"
+            assert promoted.role == "dm"
+            promoted_login = await login(
+                player.response.user.phone, "player-password-123", db
+            )
+            assert (
+                promoted_login.response.user.store_id == manager.response.user.store_id
+            )
+            assert promoted_login.response.user.role == "dm"
         finally:
             await db.close()
             await transaction.rollback()

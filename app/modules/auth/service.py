@@ -21,13 +21,19 @@ from app.modules.auth.repository import (
     get_login_identity,
     get_membership,
     get_refresh_token_for_update,
+    get_store_member_for_update,
     get_user,
+    get_user_by_phone,
     revoke_user_refresh_tokens,
+)
+from app.modules.auth.repository import (
+    list_store_members as list_store_members_from_repository,
 )
 from app.modules.auth.schemas import (
     AuthUserResponse,
     DmInviteResponse,
     RegistrationType,
+    StoreMemberResponse,
     TokenResponse,
 )
 from app.modules.user.models import User, UserRole, UserStatus
@@ -124,6 +130,30 @@ async def login(phone: str, password: str, db: AsyncSession) -> AuthResult:
     if identity is None or not verify_password(password, identity[0].password_hash):
         raise AuthenticationError("手机号或密码错误")
     user, membership = identity
+    user.last_login_at = datetime.now(UTC)
+    return await _issue_tokens(user, membership, db)
+
+
+async def login_with_public_demo_code(code: str, db: AsyncSession) -> AuthResult:
+    """使用部署环境的公开邀请码登录预设 DM 账号。
+
+    邀请码不会写入数据库或前端构建产物；演示账号必须已关联为 DM，
+    以免公开链接意外获得管理员身份。
+    """
+
+    expected_code = settings.PUBLIC_DEMO_INVITE_CODE
+    phone = settings.PUBLIC_DEMO_ACCOUNT_PHONE
+    if not expected_code or not phone:
+        raise AuthenticationError("公开演示入口尚未配置")
+    if not secrets.compare_digest(code.strip(), expected_code):
+        raise AuthenticationError("演示邀请码无效")
+
+    identity = await get_login_identity(phone, db)
+    if identity is None:
+        raise AuthenticationError("演示账号不存在或不可用")
+    user, membership = identity
+    if membership is None or membership.role != "dm":
+        raise AuthenticationError("演示账号尚未关联为 DM，请联系管理员配置")
     user.last_login_at = datetime.now(UTC)
     return await _issue_tokens(user, membership, db)
 
@@ -273,6 +303,70 @@ async def create_dm_invite(
     )
     await db.flush()
     return DmInviteResponse(code=code, expiresAt=expires_at)
+
+
+async def list_store_members(
+    store_id: uuid.UUID, db: AsyncSession
+) -> list[StoreMemberResponse]:
+    """列出当前门店的有效员工；门店范围由访问令牌决定。"""
+
+    members = await list_store_members_from_repository(store_id, db)
+    return [
+        StoreMemberResponse(
+            id=member.id,
+            userId=member.user_id,
+            nickname=member.user.nickname,
+            phone=member.user.phone or "",
+            role=member.role,
+            status=member.status,
+            createdAt=member.created_at,
+        )
+        for member in members
+    ]
+
+
+async def assign_existing_user_as_dm(
+    phone: str, store_id: uuid.UUID, db: AsyncSession
+) -> StoreMemberResponse:
+    """把已有账户授予当前门店 DM 身份。
+
+    ``users.role`` 是全局默认角色，不能拿来表达多门店权限；实际授权只
+    修改当前门店的 ``store_members``。被授权用户需要重新登录以获得新 JWT。
+    """
+
+    user = await get_user_by_phone(phone, db)
+    if user is None:
+        raise ConflictError("未找到可授权的已注册账户")
+
+    member = await get_store_member_for_update(user.id, store_id, db)
+    if member is None:
+        member = StoreMember(
+            user_id=user.id,
+            store_id=store_id,
+            role="dm",
+            status="active",
+        )
+        db.add(member)
+        await db.flush()
+        member = await get_store_member_for_update(user.id, store_id, db)
+        assert member is not None
+    elif member.role in {"manager", "admin"}:
+        raise ConflictError("该账户已是当前门店的店长或管理员，无需设为 DM")
+    else:
+        member.role = "dm"
+        member.status = "active"
+
+    # 旧 refresh token 仍携带旧角色，收回后要求用户重新登录取得新权限。
+    await revoke_user_refresh_tokens(user.id, datetime.now(UTC), db)
+    return StoreMemberResponse(
+        id=member.id,
+        userId=user.id,
+        nickname=user.nickname,
+        phone=user.phone or "",
+        role=member.role,
+        status=member.status,
+        createdAt=member.created_at,
+    )
 
 
 async def change_password(

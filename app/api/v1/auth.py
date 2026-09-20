@@ -11,17 +11,22 @@ from app.core.database import get_database
 from app.core.security import AuthenticationError, CurrentAccess, StoreManagerAccess
 from app.modules.auth.repository import get_membership, get_user
 from app.modules.auth.schemas import (
+    AssignDmRequest,
     AuthUserResponse,
     ChangePasswordRequest,
     LoginRequest,
+    PublicDemoLoginRequest,
     RegisterRequest,
     SmsCodeRequest,
     SmsLoginRequest,
 )
 from app.modules.auth.service import (
+    assign_existing_user_as_dm,
     change_password,
     create_dm_invite,
+    list_store_members,
     login,
+    login_with_public_demo_code,
     logout,
     refresh,
     register,
@@ -71,6 +76,20 @@ async def login_route(
     _set_refresh_cookie(response, result.refresh_token)
     return success_response(
         message="登录成功",
+        data=result.response.model_dump(mode="json", by_alias=True),
+    )
+
+
+@router.post("/public-demo-login")
+async def public_demo_login_route(
+    payload: PublicDemoLoginRequest,
+    response: Response,
+    db: AsyncSession = Depends(get_database),  # noqa: B008
+):
+    result = await login_with_public_demo_code(payload.code, db)
+    _set_refresh_cookie(response, result.refresh_token)
+    return success_response(
+        message="演示登录成功",
         data=result.response.model_dump(mode="json", by_alias=True),
     )
 
@@ -168,6 +187,28 @@ async def create_dm_invite_route(
     data = await create_dm_invite(access.user_id, access.store_id, db)
     return success_response(
         message="DM 邀请码创建成功",
+        data=data.model_dump(mode="json", by_alias=True),
+    )
+
+
+@router.get("/store-members")
+async def list_store_members_route(
+    access: StoreManagerAccess,
+    db: AsyncSession = Depends(get_database),  # noqa: B008
+):
+    data = await list_store_members(access.store_id, db)
+    return success_response(data=[item.model_dump(mode="json", by_alias=True) for item in data])
+
+
+@router.post("/store-members/assign-dm")
+async def assign_existing_user_as_dm_route(
+    payload: AssignDmRequest,
+    access: StoreManagerAccess,
+    db: AsyncSession = Depends(get_database),  # noqa: B008
+):
+    data = await assign_existing_user_as_dm(payload.phone, access.store_id, db)
+    return success_response(
+        message="已授予 DM 权限；该用户需重新登录后生效",
         data=data.model_dump(mode="json", by_alias=True),
     )
 
