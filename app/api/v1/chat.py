@@ -37,11 +37,14 @@ GuestIdQuery = Annotated[str | None, Query(alias="guestId", max_length=120)]
 StoreIdQuery = Annotated[uuid.UUID | None, Query(alias="storeId")]
 
 
-def optional_access(credentials: OptionalBearerCredentials) -> StoreAccessContext | None:
+def optional_access(
+    request: Request,
+    credentials: OptionalBearerCredentials,
+) -> StoreAccessContext | None:
     if credentials is None:
         return None
     try:
-        return require_authenticated_user(credentials.credentials)
+        return require_authenticated_user(request, credentials.credentials)
     except AuthenticationError:
         return None
 

@@ -3,6 +3,7 @@ from datetime import UTC, datetime, timedelta
 
 import jwt
 import pytest
+from fastapi import Request
 
 from app.core.config import settings
 from app.core.security import (
@@ -34,11 +35,15 @@ def create_token(role: str) -> tuple[str, uuid.UUID]:
 TEST_SECRET = "unit-test-secret-with-at-least-32-bytes"
 
 
+def request(method: str = "GET") -> Request:
+    return Request({"type": "http", "method": method, "headers": []})
+
+
 def test_manager_token_provides_trusted_store_id(monkeypatch) -> None:
     monkeypatch.setattr(settings, "JWT_SECRET_KEY", TEST_SECRET)
     token, store_id = create_token("manager")
 
-    context = require_store_manager(require_authenticated_user(token))
+    context = require_store_manager(require_authenticated_user(request(), token))
 
     assert context.store_id == store_id
     assert context.role == "manager"
@@ -49,7 +54,7 @@ def test_regular_user_cannot_mint_oss_upload(monkeypatch) -> None:
     token, _ = create_token("user")
 
     with pytest.raises(PermissionDeniedError):
-        require_store_manager(require_authenticated_user(token))
+        require_store_manager(require_authenticated_user(request(), token))
 
 
 def test_regular_user_token_can_have_no_store(monkeypatch) -> None:
@@ -68,7 +73,7 @@ def test_regular_user_token_can_have_no_store(monkeypatch) -> None:
         algorithm=settings.JWT_ALGORITHM,
     )
 
-    context = require_authenticated_user(token)
+    context = require_authenticated_user(request(), token)
 
     assert context.store_id is None
     assert context.role == "user"
@@ -78,4 +83,4 @@ def test_invalid_token_is_rejected(monkeypatch) -> None:
     monkeypatch.setattr(settings, "JWT_SECRET_KEY", TEST_SECRET)
 
     with pytest.raises(AuthenticationError):
-        require_authenticated_user("not-a-jwt")
+        require_authenticated_user(request(), "not-a-jwt")
